@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class RootScreenCaptureManager {
 
-    private static final String TAG = "NJOCR-RootCap";
+    private static final String TAG = "XiaoSunOCR-RootCap";
 
     /** 单次截屏命令超时（毫秒）。 */
     private static final long TIMEOUT_MS = 10_000;

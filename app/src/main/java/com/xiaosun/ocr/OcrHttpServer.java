@@ -18,18 +18,23 @@ import java.util.Map;
 import fi.iki.elonen.NanoHTTPD;
 
 /**
- * 复刻原版 NJOCR 的本地 HTTP 接口。
+ * 本地 HTTP 接口服务。
  *
- * 与原版（Ktor + Netty）保持一致的对外协议：
- *   监听 127.0.0.1:1666，路由 POST "/"
- *   参数支持 JSON Body / 表单 / Query 三种形式：path、type
+ * 监听 127.0.0.1:1666，提供 OCR 识别能力给 App 内部与外部脚本/自动化工具。
+ *
+ * 路由：
+ *   POST /                          识别（path 可选，不传则自动截屏）
+ *   GET  /last                      读取上一次识别结果
+ *   GET  /last?format=text          同上，返回纯文本
+ *   GET  /ocr?format=text           一步完成「取图 → 识别 → 返回文本」
+ *
+ * 参数支持 JSON Body / 表单 / Query 三种形式：path、type、tier、action
  *   type: 1=纯文本  2=Json数组(含坐标)  3=详细Json(含矩形)
- *   不传 path 时自动截屏识别
  *   响应体直接使用 native 返回的 JSON 文本
  */
 public class OcrHttpServer extends NanoHTTPD {
 
-    private static final String TAG = "NJOCR";
+    private static final String TAG = "XiaoSunOCR";
 
     private final OCRService service;
 

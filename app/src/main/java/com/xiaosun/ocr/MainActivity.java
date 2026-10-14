@@ -198,7 +198,7 @@ public class MainActivity extends AppCompatActivity {
                     toast("未检测到 root，请改用「开启截屏授权」");
                 }
             });
-        }, "njocr-root-probe").start();
+        }, "xsocr-root-probe").start();
     }
 
     // ============================================================
@@ -1032,7 +1032,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 updateTierInfo();
             });
-        }, "njocr-tier").start();
+        }, "xsocr-tier").start();
     }
 
     /** 发送一个 JSON body 到本地接口，返回响应文本（失败返回 null）。 */

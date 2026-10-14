@@ -15,7 +15,7 @@ android {
         versionName '2.1'
 
         // 仅保留 arm64-v8a 与 armeabi-v7a（已移除 x86_64）
-        // 说明：libnjocr.so 是预编译产物，放在 jniLibs/ 下直接打包，
+        // 说明：native 库是预编译产物，放在 jniLibs/ 下直接打包，
         //       不依赖 externalNativeBuild / NDK 编译。
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a'
@@ -41,7 +41,7 @@ android {
                     'META-INF/NOTICE.txt'
             ]
         }
-        // 让 libnjocr.so / libc++_shared.so 解压到 lib 目录，保证依赖库能被正确加载
+        // native 库解压到 lib 目录，保证依赖库能被正确加载
         jniLibs {
             useLegacyPackaging true
         }

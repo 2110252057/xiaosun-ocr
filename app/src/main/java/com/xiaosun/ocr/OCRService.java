@@ -21,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * OCR 前台服务：加载本地模型并用 HTTP 暴露识别接口。
  *
- * 重要：包名 / 类名 / 方法签名必须与 libnjocr.so 里写死的 JNI 符号一致，
- * 符号形如：
+ * 【JNI 约定】native 库（libnjocr.so）用静态符号绑定，没有 JNI_OnLoad，
+ * 因此无法动态注册，符号名必须与 Java 侧完全对应，形如：
  *   Java_<包名下划线化>_<类名>_<方法名>
  * 当前为：
  *   Java_com_xiaosun_ocr_OCRService_initModels
@@ -31,8 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   Java_com_xiaosun_ocr_OCRService_nativeGetTier
  *   Java_com_xiaosun_ocr_OCRService_nativeSetRapidDir
  *
- * 注意：该 .so 没有 JNI_OnLoad，无法动态注册，
- * 所以**改包名或类名必须同步重编 .so**，否则一启动就 UnsatisfiedLinkError。
+ * ⚠️ 改包名 / 类名 / 方法签名，都必须同步重编 native 库，
+ *    否则一启动就 UnsatisfiedLinkError。
  *
  * 防冻结措施：
  *   1. 常驻前台服务（START_STICKY + 常驻通知）
@@ -42,14 +42,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class OCRService extends Service {
 
-    private static final String TAG = "NJOCR";
+    private static final String TAG = "XiaoSunOCR";
 
     /** 界面通过 Intent 传入截屏授权结果的 action / extra key。 */
     public static final String ACTION_START_CAPTURE = "com.xiaosun.ocr.START_CAPTURE";
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
 
-    private static final String CHANNEL_ID = "njocr_channel";
+    private static final String CHANNEL_ID = "xsocr_service";
+    /** 早期版本用过的渠道 ID，启动时清理掉，避免系统设置里残留重复项。 */
+    private static final String LEGACY_CHANNEL_ID = "njocr_channel";
     private static final int NOTIFICATION_ID = 1666;
 
     /** 供界面判断服务是否已在运行。 */
@@ -90,7 +92,9 @@ public class OCRService extends Service {
     private final AtomicInteger activeRequests = new AtomicInteger(0);
 
     static {
-        // 与原版一致
+        // 加载 native 推理引擎。
+        // 名称必须与 jniLibs 下的文件名 libnjocr.so 一致 ——
+        // 改这里就必须同步重命名 .so，否则 UnsatisfiedLinkError。
         System.loadLibrary("njocr");
     }
 
@@ -175,7 +179,7 @@ public class OCRService extends Service {
         }
     }
 
-    private static final String PREFS = "njocr_prefs";
+    private static final String PREFS = "xsocr_prefs";
     private static final String KEY_TIER = "model_tier";
 
     // ===================== 屏幕截图 =====================
@@ -294,7 +298,7 @@ public class OCRService extends Service {
                 if (cpuLock == null) {
                     PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
                     if (pm != null) {
-                        cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NJOCR:ocr");
+                        cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "XiaoSunOCR:ocr");
                         cpuLock.setReferenceCounted(false);
                     }
                 }
@@ -381,7 +385,7 @@ public class OCRService extends Service {
                 Log.e(TAG, "模型初始化异常: " + e.getMessage());
             }
             startHttpServer();
-        }, "njocr-init").start();
+        }, "xsocr-init").start();
     }
 
     /**
@@ -464,11 +468,21 @@ public class OCRService extends Service {
     private Notification buildNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            if (nm != null && nm.getNotificationChannel(CHANNEL_ID) == null) {
-                NotificationChannel channel = new NotificationChannel(
-                        CHANNEL_ID, "小孙OCR 服务", NotificationManager.IMPORTANCE_LOW);
-                channel.setShowBadge(false);
-                nm.createNotificationChannel(channel);
+            if (nm != null) {
+                // 清理早期版本遗留的通知渠道，避免在系统设置里出现重复项
+                try {
+                    if (nm.getNotificationChannel(LEGACY_CHANNEL_ID) != null) {
+                        nm.deleteNotificationChannel(LEGACY_CHANNEL_ID);
+                    }
+                } catch (Throwable ignored) {
+                }
+
+                if (nm.getNotificationChannel(CHANNEL_ID) == null) {
+                    NotificationChannel channel = new NotificationChannel(
+                            CHANNEL_ID, "小孙OCR 服务", NotificationManager.IMPORTANCE_LOW);
+                    channel.setShowBadge(false);
+                    nm.createNotificationChannel(channel);
+                }
             }
         }
 

@@ -11,7 +11,7 @@ import android.util.Log;
  */
 public class BootReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "NJOCR";
+    private static final String TAG = "XiaoSunOCR";
 
     @Override
     public void onReceive(Context context, Intent intent) {

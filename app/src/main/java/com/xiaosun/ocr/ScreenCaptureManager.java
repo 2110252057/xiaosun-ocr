@@ -28,7 +28,7 @@ import java.nio.ByteBuffer;
  */
 public class ScreenCaptureManager {
 
-    private static final String TAG = "NJOCR";
+    private static final String TAG = "XiaoSunOCR";
 
     private final Context context;
 
@@ -85,7 +85,7 @@ public class ScreenCaptureManager {
             throw new IllegalStateException("屏幕尺寸异常: " + width + "x" + height);
         }
 
-        handlerThread = new HandlerThread("NJOCR-Screen");
+        handlerThread = new HandlerThread("XiaoSunOCR-Screen");
         handlerThread.start();
         handler = new Handler(handlerThread.getLooper());
 
@@ -104,7 +104,7 @@ public class ScreenCaptureManager {
         mediaProjection.registerCallback(projectionCallback, handler);
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
-                "NJOCR-Screen",
+                "XiaoSunOCR-Screen",
                 width, height, densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),

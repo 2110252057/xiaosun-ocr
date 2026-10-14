@@ -1,23 +1,25 @@
-# NJOCR 复刻工程
+# 小孙OCR
 
-基于原版 `NJOCR_2.0.apk` 逆向结果复刻的本地离线 OCR 工具。
+本地离线 OCR 工具。识别全部在本机完成，**无需联网**。
 
-## 一、复刻原则
+支持截屏识别、图片文件识别，并提供本地 HTTP 接口与 **MacroDroid / Tasker 插件**能力，
+方便接入自动化流程。
 
-原版核心是一份二进制本地引擎（PP-OCRv5 + NCNN），无法用源码重写，
-因此本工程的做法是：
+## 一、技术构成
 
-| 层 | 做法 |
+| 层 | 说明 |
 |---|---|
-| 原生推理引擎 | **重编译** `libnjocr.so`（2 个 ABI），模型升级为 **PP-OCRv6 tiny** |
-| 模型与字典 | **PP-OCRv6 tiny**（ONNX → ncnn 转换），字典 6904 字符 |
-| JNI 绑定 | 类名与 native 方法签名**与原版完全一致**，直接对上原库符号 |
-| 服务与接口 | **完整复刻**，协议 100% 对齐原版（已移除 base64 传图） |
-| 界面 | **完整复刻**（程序化 UI，两个页签） |
+| 推理引擎 | 自编译 native 库（2 个 ABI），基于 PP-OCRv6 模型 |
+| 模型档位 | `tiny`（轻量）/ `small`（高精度）/ `rapid`（RapidOCR，含方向纠正） |
+| JNI 绑定 | 静态符号绑定，类名与方法签名须与 native 库一致 |
+| 服务与接口 | 前台服务 + 本地 HTTP（127.0.0.1:1666） |
+| 插件 | 完整实现 Tasker/Locale 协议，支持异步变量回传 |
+| 界面 | 程序化 UI，两个页签（接口文档 / 在线调试） |
 
-> 因 JNI 符号写死为 `Java_com_wubugncnn_njocr_OCRService_initModels` /
-> `Java_com_wubugncnn_njocr_OCRService_nativeProcessBitmap`，
-> 所以包名、类名、方法名必须保持原样，**不要改名**。
+> **JNI 约定**：native 库没有 `JNI_OnLoad`，无法动态注册，
+> 符号形如 `Java_<包名下划线化>_<类名>_<方法名>`，当前为
+> `Java_com_xiaosun_ocr_OCRService_*`。
+> ⚠️ 改动包名 / 类名 / 方法签名必须同步重编 native 库，否则启动即 `UnsatisfiedLinkError`。
 
 ## 二、目录结构
 
@@ -35,13 +37,16 @@ ocr/
         ├── java/com/xiaosun/ocr/
         │   ├── MainActivity.java            主界面（文档/调试 两个页签）
         │   ├── OCRService.java              前台服务 + JNI native 声明
-        │   ├── OcrHttpServer.java           本地 HTTP 接口（1666 协议）
+        │   ├── OcrHttpServer.java           本地 HTTP 接口
         │   ├── Http.java                    极简 HTTP 客户端（供插件复用）
+        │   ├── ScreenCaptureManager.java    MediaProjection 截屏
+        │   ├── RootScreenCaptureManager.java root 截屏（screencap）
+        │   ├── BootReceiver.java            开机自启
         │   ├── PluginContract.java          Tasker/Locale 插件协议常量
-        │   ├── PluginEditActivity.java      插件配置界面（宏里点插件时打开）
-        │   └── PluginFireReceiver.java      插件执行入口（宏触发时干活 + 回传变量）
-        ├── jniLibs/                  重编译 so（arm64-v8a / armeabi-v7a）
-        │   ├── */libnjocr.so         ← PP-OCRv6 推理引擎（tiny/small/rapid 三档）
+        │   ├── PluginEditActivity.java      插件配置界面
+        │   └── PluginFireReceiver.java      插件执行入口（回传变量）
+        ├── jniLibs/                  native 库（arm64-v8a / armeabi-v7a）
+        │   ├── */libnjocr.so         推理引擎（tiny/small/rapid 三档）
         │   └── */libc++_shared.so
         ├── assets/                   模型
         │   ├── det.* / rec.*         tiny 档
@@ -50,48 +55,70 @@ ocr/
         └── res/                      图标与主题
 ```
 
-## 三、MacroDroid 插件（Tasker/Locale 规范）
+## 三、MacroDroid 插件
 
-本 App 同时是一个 **Tasker/Locale 兼容插件**，MacroDroid / Tasker 可直接调用。
+本 App 是一个 **Tasker/Locale 兼容插件**，MacroDroid / Tasker 可直接调用。
 
-### 怎么用（MacroDroid）
+### 配置步骤
 
 1. 新建宏 → 动作 → **Tasker/Locale Plugin**
 2. 在插件列表里选 **小孙OCR**
-3. 弹出的配置界面里设：
+3. 在配置界面设置：
    - **图片来源**：截取当前屏幕 / 指定图片路径
    - **模型档位**：tiny / small / rapid
    - **输出格式**：纯文本 / 含坐标
-4. 保存后，勾选动作里的 **「Block next actions until complete」**（等待完成）
-5. 在后续动作里用变量拿结果
+   - **指定文本**（可选）：要查找的文字
+   - **匹配方式**：包含文本 / 匹配文本（完全一致）
+4. **保存**（保存时才会把变量清单告知宿主）
+5. 在动作里展开 **Output variables**，把需要的变量映射到宏变量
 
 ### 回传的变量
 
-| 变量 | 内容 |
-|---|---|
-| `%xsocr_text` | 识别出的全部文本（多行用换行或空格拼接） |
-| `%xsocr_count` | 文本块数量 |
-| `%xsocr_success` | `true` / `false` |
-| `%xsocr_error` | 出错信息（失败时才有内容） |
-| `%xsocr_time` | 耗时（毫秒） |
-| `%xsocr_tier` | 实际使用的档位 |
+| 变量 | 类型 | 内容 |
+|---|---|---|
+| `%xsocr_text` | 文本 | 识别出的全部文本（多行用换行或空格拼接） |
+| `%xsocr_match` | 文本 | 指定文本是否找到：`true` / `false` |
+| `%xsocr_x` | **整数** | 命中处的 x 坐标；未找到为 `-1` |
+| `%xsocr_y` | **整数** | 命中处的 y 坐标；未找到为 `-1` |
+| `%xsocr_error` | 文本 | 出错信息（失败时才有内容） |
+| `%xsocr_time` | 文本 | 耗时（毫秒） |
+| `%xsocr_tier` | 文本 | 实际使用的档位 |
 
-> 用 **「Block next actions until complete」** 才会等识别完成；
-> 不勾选的话宏会直接往下走，变量可能还没填好。
+> 坐标基于**截图原始像素**，可直接用于点击坐标。
+
+### 匹配方式说明
+
+| 方式 | 行为 | 例子（查找「确定」） |
+|---|---|---|
+| **包含文本** | 文本块含这几个字即算命中 | 匹配「确定提交」「请点确定」 |
+| **匹配文本** | 整个文本块与它完全一致 | 只匹配「确定」 |
+
+两者均**不区分大小写**，取第一个命中的文本块。
 
 ### 实现说明
 
+- **异步变量回传**：宿主发有序广播后只等 11 秒，超时即丢弃结果。
+  本插件先回 `RESULT_CODE_PENDING`，再通过宿主预置的 `COMPLETION_INTENT`
+  在识别完成后补送变量，因此**不受该超时限制**。
 - 协议常量**手写内联**，不引入已归档的第三方库（`PluginContract.java`）
-- 变量回传走 Tasker 扩展：
-  `net.dinglisch.android.tasker.extras.VARIABLES` + 能力位 `2`
-- `PluginFireReceiver` 用 `goAsync()`，因为 OCR 可能超过 onReceive 的 10 秒窗口
 - 识别统一走本地 HTTP（1666），与 App 内、外部脚本**完全同一条路径**
 
 ## 四、接口协议
 
 - 地址：`http://127.0.0.1:1666`
-- 路由：`POST /`
-- 参数（支持 JSON Body / form 表单 / query 三种方式）：
+
+### 路由
+
+| 路由 | 说明 |
+|---|---|
+| `POST /` | 识别（`path` 可选，不传则自动截屏） |
+| `GET /last` | 读取上一次识别结果（JSON） |
+| `GET /last?format=text` | 同上，返回纯文本 |
+| `GET /ocr?format=text` | 一步完成「取图 → 识别 → 返回文本」 |
+
+### POST / 参数
+
+支持 JSON Body / form 表单 / query 三种方式：
 
 | 字段 | 说明 |
 |---|---|
@@ -107,11 +134,11 @@ ocr/
 > 三档差异：
 > | 档位 | 特点 |
 > |---|---|
-> | `tiny` | 最快，模型 3.1 MB，字典 6904 |
+> | `tiny` | 最快，模型最小，字典 6904 |
 > | `small` | 字典 18708，保留更多标点/符号 |
 > | `rapid` | **RapidOCR**：clipper 精确后处理 + AngleNet 方向纠正 + 置信度 |
 >
-> ⚠️ **已移除 `base64` 传图方式。** 原因：base64 会让请求体膨胀 33%，
+> ⚠️ **不支持 `base64` 传图。** 原因：base64 会让请求体膨胀 33%，
 > 且服务端要先整块解码成字节数组再解码位图，一张 4K 图峰值内存可达 60MB+，
 > 低端机容易 OOM。改用 `path` 后由 `decodeFileSafe` 直接按需降采样，内存可控。
 
@@ -123,7 +150,7 @@ ocr/
 # 启动后台服务（供自动化脚本使用）
 am start-foreground-service com.xiaosun.ocr/.OCRService
 
-# 用 curl 测试（传路径）
+# 传路径识别
 curl -X POST http://127.0.0.1:1666 -H "Content-Type: application/json" \
      -d '{"path":"/sdcard/test.png","type":1}'
 
@@ -135,13 +162,15 @@ curl -X POST http://127.0.0.1:1666 -H "Content-Type: application/json" \
 curl -X POST http://127.0.0.1:1666 -H "Content-Type: application/json" \
      -d '{"tier":"small","action":"setTier"}'
 
-# 切到 RapidOCR 档
-curl -X POST http://127.0.0.1:1666 -H "Content-Type: application/json" \
-     -d '{"tier":"rapid","action":"setTier"}'
-
 # 识别的同时切换档位
 curl -X POST http://127.0.0.1:1666 -H "Content-Type: application/json" \
      -d '{"path":"/sdcard/test.png","type":1,"tier":"small"}'
+
+# 一步完成截屏+识别，直接拿纯文本
+curl "http://127.0.0.1:1666/ocr?format=text"
+
+# 读取上一次识别结果
+curl "http://127.0.0.1:1666/last?format=text"
 ```
 
 ```javascript
@@ -151,21 +180,7 @@ var res = http.post("http://127.0.0.1:1666",
 log(res.body.string());
 ```
 
-## 四、实现说明（与原版的差异点）
-
-原版 HTTP 服务端用的是 **Ktor + Netty**（Kotlin 协程库）；
-本工程是 Java 模板，从 Java 调用 Ktor 的 suspend DSL 极不稳定，
-因此改用 **NanoHTTPD**（纯 Java 嵌入式服务器）实现**完全相同的对外协议**。
-
-**对外行为（端口、路径、type、响应、错误码）完全一致**，
-识别结果由同一个 `libnjocr.so` 产出。
-
-> 与最初复刻版的两点差异：
-> 1. 已**移除 `base64` 传图**（原版支持）。改用 `path`，并新增按需降采样，
->    避免大图 OOM，见第三节说明。
-> 2. `libnjocr.so` 为**重编译版**，内部做了准确率参数优化（见 `build/njocr_patch/`）。
-
-## 四之二、截屏识别：root 优先，无需授权
+## 五、截屏识别：root 优先，无需授权
 
 不传 `path` 时，服务会自行截屏。截屏有两条路径，**按顺序自动选择**：
 
@@ -179,13 +194,13 @@ log(res.body.string());
 - **有 root 的设备**：服务启动后自动启用 root 截屏（会先试拍一张确认可用），
   `isScreenCaptureReady` 直接为 `true`，调用方**无需任何授权步骤**，
   也不会出现系统录屏确认框。适合无人值守 / 自动化脚本场景。
-- **无 root 的设备**：行为与原来一致，需在 App 内点一次「开启截屏授权」。
+- **无 root 的设备**：需在 App 内点一次「开启截屏授权」。
 - 界面「屏幕截屏识别」卡片会显示当前走的哪条路径，
   并提供 **检测 root 截屏** 手动入口。
 - 若 root 截屏在某次调用中失败（例如 SELinux 临时拦截），
   会自动**回退到 MediaProjection**，不会直接报错。
 
-### 为什么用 `screencap` 而不是 `su` + MediaProjection
+### 为什么用 `screencap`
 
 `screencap` 是 Android 自带的系统命令，root 下可直接抓取当前屏幕，
 只依赖一次 `su` 授权（由 Magisk / SuperSU 管理，一次授权长期有效），
@@ -203,9 +218,7 @@ log(res.body.string());
 - 命令用 `sh -c` 包一层完整字符串传入，避免 `ProcessBuilder` 拆参数出错；
   同时排空子进程输出，防止缓冲区写满导致 `screencap` 阻塞。
 
-新增文件：`RootScreenCaptureManager.java`。
-
-## 五、构建
+## 六、构建
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
@@ -224,9 +237,9 @@ bash ./gradlew assembleDebug --console=plain
    android.aapt2FromMavenOverride=/opt/android-sdk/build-tools/35.0.0/aapt2
    ```
    写入 `gradle.properties`，或改用 Android Studio / AndroidIDE 构建。
-3. 首次构建需联网下载 AGP 8.13 与依赖（约几分钟）。
+3. 首次构建需联网下载 AGP 与依赖（约几分钟）。
 
-## 六、使用步骤
+## 七、使用步骤
 
 1. 安装 APK，首次启动会申请「所有文件访问权限」。
 2. **打开 App 即自动启动 OCR 服务**（无需手动点启动）。
