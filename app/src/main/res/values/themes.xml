@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <style name="AppTheme" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorOnPrimary">@color/text_on_brand</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/surface</item>
+        <item name="android:navigationBarColor">@color/surface</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
+    </style>
+
+    <!--
+      插件配置界面用的主题。
+
+      做成对话框样式（Dialog）而不是全屏 Activity：
+      宿主（MacroDroid / Tasker）拉起插件配置时，用户预期是"弹个小窗配一下就好"，
+      全屏会显得很突兀、也容易让人以为跳出了宿主。
+      Material3 的 Dialog 主题本身就不带 ActionBar，所以不需要 NoActionBar 后缀。
+      （注意：Theme.Material3.Light.Dialog.NoActionBar 并不存在，写它会 AAPT 报错）
+    -->
+    <style name="PluginDialogTheme" parent="Theme.Material3.Light.Dialog">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorOnPrimary">@color/text_on_brand</item>
+        <item name="colorSurface">@color/surface</item>
+        <item name="colorOnSurface">@color/text_primary</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:windowBackground">@color/bg</item>
+
+        <!--
+          关键：Material3 的 Dialog 主题是给 AlertDialog 用的，窗口默认极窄。
+          不设这两项的话，配置界面会被挤成一条竖线、文字全部竖排。
+          这里强制窗口至少占屏幕 92%。
+        -->
+        <item name="android:windowMinWidthMajor">92%</item>
+        <item name="android:windowMinWidthMinor">92%</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
+</resources>

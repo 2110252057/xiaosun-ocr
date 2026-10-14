@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主色 -->
+    <color name="brand">#4F6BED</color>
+    <color name="brand_dark">#3B54C4</color>
+    <color name="brand_soft">#EDF0FE</color>
+
+    <!-- 中性色 -->
+    <color name="bg">#F5F6FA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="divider">#EAECF2</color>
+
+    <!-- 文字 -->
+    <color name="text_primary">#1A1D26</color>
+    <color name="text_secondary">#6B7280</color>
+    <color name="text_hint">#9CA3AF</color>
+    <color name="text_on_brand">#FFFFFF</color>
+
+    <!-- 语义色 -->
+    <color name="success">#12B76A</color>
+    <color name="warning">#F79009</color>
+    <color name="danger">#F04438</color>
+
+    <!-- 代码块 -->
+    <color name="code_bg">#1E2029</color>
+    <color name="code_text">#C8D0E0</color>
+
+    <color name="ic_launcher_background">#4F6BED</color>
+</resources>

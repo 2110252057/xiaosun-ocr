@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- 前台服务：保证进程在后台/息屏时不轻易被回收 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 申请忽略电池优化（Doze 白名单），避免息屏后 CPU 被冻结 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 开机自启，保证长时间无人值守时服务始终可用 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 唤醒锁：请求处理期间保持 CPU 清醒，防止息屏时响应超时 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- 屏幕截图（MediaProjection） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application
+        android:allowBackup="true"
+        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          与原版一致：导出的前台服务，供自动化脚本用 am start-foreground-service 拉起。
+          stopWithTask=false：从最近任务划掉 App 时服务不被杀，外部调用不会中断。
+          mediaProjection：支持不传图片、由接口自行截屏识别。
+        -->
+        <service
+            android:name=".OCRService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="specialUse|mediaProjection"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="OCR and Local Web Server for Automation" />
+        </service>
+
+        <!-- 开机 / 应用更新后自动拉起服务 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ==================== Tasker/Locale 插件（MacroDroid 兼容） ====================
+             MacroDroid 的「Tasker/Locale Plugin」动作会扫描设备上符合该规范的 App。
+             我们只要声明好这两个组件，就会出现在它的插件列表里。
+
+             规范要点：
+               Activity          —— 响应 ACTION_EDIT_SETTING，负责配置界面
+               BroadcastReceiver —— 响应 ACTION_FIRE_SETTING，负责实际执行
+             ============================================================================ -->
+
+        <activity
+            android:name=".PluginEditActivity"
+            android:exported="true"
+            android:label="小孙OCR"
+            android:theme="@style/PluginDialogTheme">
+            <intent-filter>
+                <action android:name="com.twofortyfouram.locale.intent.action.EDIT_SETTING" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".PluginFireReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.twofortyfouram.locale.intent.action.FIRE_SETTING" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>
