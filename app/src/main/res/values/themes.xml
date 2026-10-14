@@ -41,4 +41,26 @@
         <item name="android:windowNoTitle">true</item>
     </style>
 
+    <!--
+      截屏授权中转 Activity 用的「全透明」主题。
+
+      用途：插件在后台需要截屏授权时，拉起 ScreenCaptureRequestActivity，
+      由它去弹系统授权框。整个过程用户只应看到系统自己的授权弹窗，
+      不该看到我们这个中转 Activity 的任何界面。
+
+      ⚠️ 这里**刻意不用 android:windowNoDisplay**。
+      那个属性会让窗口彻底不显示，但系统授权框需要一个可见的宿主 Activity，
+      用了它反而可能导致授权框弹不出来 / onActivityResult 不回调。
+      所以采用「半透明 + 全透明背景」的常规做法：
+      窗口存在（能承载授权框），但视觉上完全看不见。
+    -->
+    <style name="TransparentCaptureTheme" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
 </resources>

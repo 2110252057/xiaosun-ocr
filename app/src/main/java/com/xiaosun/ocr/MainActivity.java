@@ -688,11 +688,16 @@ public class MainActivity extends AppCompatActivity {
         capRow2.setLayoutParams(capRow2Lp);
         capRow2.addView(secondaryButton("开启截屏授权（无 root 时用）",
                 v -> requestScreenCapture()), weightLp());
+        capRow2.addView(secondaryButton("悬浮窗权限", v -> requestOverlayPermission()),
+                weightLp());
         capCard.addView(capRow2);
 
         TextView capNote = new TextView(this);
         capNote.setText("有 root 的设备会自动启用 root 截屏（screencap），"
-                + "无需任何授权、也不会弹录屏框；\n无 root 时才需要点击「开启截屏授权」。");
+                + "无需任何授权、也不会弹录屏框。\n"
+                + "无 root 时才需要「开启截屏授权」。\n\n"
+                + "「悬浮窗权限」建议一并开启：MacroDroid 在后台触发插件时，"
+                + "App 需要它才能自动弹出截屏授权框（否则只能先手动打开 App 授权）。");
         capNote.setTextSize(11);
         capNote.setTextColor(C_HINT);
         capNote.setLineSpacing(0f, 1.3f);
@@ -885,8 +890,17 @@ public class MainActivity extends AppCompatActivity {
             capInfo.setText("● 已授权（MediaProjection），可直接截屏识别");
             capInfo.setTextColor(C_OK);
         } else {
-            capInfo.setText("○ 未就绪：无 root 时请点击“开启截屏授权”\n"
-                    + "（有 root 的设备会自动启用 root 截屏，免授权）");
+            // 未就绪时，把「悬浮窗权限」也一起提示出来 ——
+            // 没有它，插件在后台无法自动弹授权框
+            boolean overlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+                    || android.provider.Settings.canDrawOverlays(this);
+            StringBuilder sb = new StringBuilder();
+            sb.append("○ 未就绪：无 root 时请点击「开启截屏授权」\n")
+              .append("（有 root 的设备会自动启用 root 截屏，免授权）");
+            if (!overlay) {
+                sb.append("\n⚠ 未开启「悬浮窗权限」：插件在后台无法自动申请截屏");
+            }
+            capInfo.setText(sb.toString());
             capInfo.setTextColor(C_WARN);
         }
     }
@@ -919,6 +933,45 @@ public class MainActivity extends AppCompatActivity {
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE);
         } catch (Exception e) {
             toast("申请截屏失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 申请「悬浮窗权限」（SYSTEM_ALERT_WINDOW）。
+     *
+     * 【为什么需要】
+     * MacroDroid 在后台触发插件时，本应用可能处于后台/已死状态。
+     * 此时要弹出截屏授权框，就必须能从后台启动 Activity ——
+     * 而 Android 10+ 只允许「拥有悬浮窗权限」的应用这么做。
+     *
+     * 没有这个权限时，插件仍能工作，但需要用户先手动打开一次 App 授权。
+     *
+     * 注意：该权限不能通过 requestPermissions 申请，
+     * 必须跳转到系统设置页由用户手动开启。
+     */
+    private void requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            toast("当前系统版本无需此权限");
+            return;
+        }
+        try {
+            if (android.provider.Settings.canDrawOverlays(this)) {
+                toast("悬浮窗权限已开启");
+                return;
+            }
+            Intent intent = new Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+            toast("请在系统设置里允许「显示在其他应用上层」");
+        } catch (Exception e) {
+            // 部分 ROM 不支持带 package 的跳转，退回通用设置页
+            try {
+                startActivity(new Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+            } catch (Exception e2) {
+                toast("无法打开悬浮窗权限设置: " + e2.getMessage());
+            }
         }
     }
 

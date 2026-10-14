@@ -28,6 +28,26 @@
     <!-- 屏幕截图（MediaProjection） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <!--
+      悬浮窗权限（SYSTEM_ALERT_WINDOW）。
+
+      ★ 为什么必须要它
+      插件的执行入口是 BroadcastReceiver（后台广播），受两条 Android 限制：
+        1. Android 12+ 禁止后台应用调用 startForegroundService()
+        2. MediaProjection 授权必须由 Activity 发起（createScreenCaptureIntent 是 Activity API）
+      于是"没有后台服务时，插件无法截屏识别"。
+
+      而拥有 SYSTEM_ALERT_WINDOW 的应用被系统视为"用户可见的前台应用"，
+      可以：
+        · 从后台启动 Activity（用于弹出截屏授权框）
+        · 从后台启动前台服务
+      这两点正好解开上面两个限制。
+
+      注意：该权限不会自动授予，需要引导用户在系统设置里手动开启
+      （见 MainActivity 的「悬浮窗权限」引导）。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="true"
         android:extractNativeLibs="true"
@@ -47,6 +67,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          截屏授权中转 Activity。
+
+          插件（BroadcastReceiver）无法直接弹 MediaProjection 授权框，
+          于是由它代为发起。设为：
+            · exported=false      —— 只允许本应用拉起，避免被外部滥用
+            · 透明主题             —— 用户只看到系统授权弹窗
+            · excludeFromRecents   —— 不进入最近任务列表
+            · taskAffinity=""      —— 独立任务栈，不与主界面混在一起
+
+          ⚠️ 刻意**不加 noHistory**：
+          弹系统授权框时本 Activity 会进入 onPause，
+          若设了 noHistory 就会被立即销毁，导致 onActivityResult 收不到结果。
+        -->
+        <activity
+            android:name=".ScreenCaptureRequestActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:taskAffinity=""
+            android:theme="@style/TransparentCaptureTheme" />
 
         <!--
           与原版一致：导出的前台服务，供自动化脚本用 am start-foreground-service 拉起。

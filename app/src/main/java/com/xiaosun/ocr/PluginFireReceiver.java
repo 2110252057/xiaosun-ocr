@@ -291,25 +291,63 @@ public class PluginFireReceiver extends BroadcastReceiver {
         // ---------- 1. 确保服务在跑 ----------
         // 服务承载 HTTP 接口和 native 识别能力，必须先就绪。
         //
-        // 注意两点：
-        //   a) Android 12+ 不允许后台应用 startForegroundService()，
-        //      会抛 ForegroundServiceStartNotAllowedException。
-        //   b) 【踩过的坑】探测必须用轻量请求。
-        //      早先用 POST {} 探测，服务端会走去「截屏」分支、
-        //      耗时可达 15 秒，导致误判"服务未就绪"而白等到超时。
-        //      现在 ping() 走 GET /last，是纯读操作，毫秒级返回。
-        if (!Http.ping(PING_QUICK_MS)) {
+        // 【为什么可能没起来】
+        // 插件由 MacroDroid 的广播触发，此时本应用可能处于「已死」状态
+        // （用户划掉了最近任务，或系统回收了进程）。
+        //
+        // 【两个 Android 限制 + 破解办法】
+        //   a) Android 12+ 禁止后台应用 startForegroundService()。
+        //      → 但「收到广播后的约 10 秒内」属于系统给的豁免窗口，
+        //        在这个窗口里调用是允许的，所以要在 onReceive 后尽快调用。
+        //   b) 无 root 时截屏依赖 MediaProjection 授权，
+        //      而授权只能由 Activity 发起，广播无法弹框。
+        //      → 拉起 ScreenCaptureRequestActivity 代为申请（需悬浮窗权限）。
+        //
+        // 【踩过的坑】探测必须用轻量请求。
+        //   早先用 POST {} 探测，服务端会走去「截屏」分支、耗时可达 15 秒，
+        //   导致误判"服务未就绪"而白等到超时。
+        //   现在 ping() 走 GET /last，是纯读操作，毫秒级返回。
+        boolean serverUp = Http.ping(PING_QUICK_MS);
+
+        if (!serverUp) {
+            Log.i(TAG, "服务未运行，尝试拉起（广播豁免窗口内）");
             try {
                 Intent svc = new Intent(ctx, OCRService.class);
-                ctx.startForegroundService(svc);
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    ctx.startForegroundService(svc);
+                } else {
+                    ctx.startService(svc);
+                }
             } catch (Throwable t) {
-                Log.w(TAG, "启动服务失败: " + t);
+                // 常见的两种：ForegroundServiceStartNotAllowedException（后台限制）
+                // 或 BackgroundServiceStartNotAllowedException。
+                // 不直接放弃：服务可能已被其他途径拉起，下面照样轮询等待。
+                Log.w(TAG, "拉起服务失败（可能受后台限制）: " + t);
             }
+            serverUp = waitServerReadyUntil(deadline);
         }
-        if (!waitServerReadyUntil(deadline)) {
-            fail(vars, "OCR 服务未就绪（预算 " + HOST_BUDGET_MS + "ms 用尽）。"
-                    + "请先打开一次「小孙OCR」App，让服务保持运行。");
+
+        if (!serverUp) {
+            fail(vars, "OCR 服务未能启动。"
+                    + "请检查「小孙OCR」是否被系统限制了后台运行（自启动/省电策略）。");
             return;
+        }
+
+        // ---------- 1.5 截屏能力检查（仅「截屏」来源需要） ----------
+        // 走「指定图片路径」时不涉及截屏，跳过。
+        if (!PluginContract.SOURCE_PATH.equals(source)
+                && !OCRService.isScreenCaptureReady) {
+            Log.i(TAG, "尚无截屏能力，尝试申请授权");
+
+            boolean ok = requestScreenCaptureIfNeeded(ctx, deadline);
+
+            if (!ok) {
+                fail(vars, "截屏未就绪。"
+                        + "请在「小孙OCR」中开启「悬浮窗权限」（插件才能自动申请截屏），"
+                        + "或打开 App 手动点一次「开启截屏授权」。");
+                return;
+            }
+            Log.i(TAG, "截屏授权完成，继续识别");
         }
 
         // ---------- 2. 构造请求 ----------
@@ -506,6 +544,97 @@ public class PluginFireReceiver extends BroadcastReceiver {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /**
+     * 确保截屏能力可用，必要时拉起授权界面。
+     *
+     * 【背景】
+     * 无 root 时，截屏必须依赖 MediaProjection 授权，而该授权
+     * 只能由 Activity 发起（createScreenCaptureIntent 是 Activity API）。
+     * 插件的入口是 BroadcastReceiver，没法自己弹框。
+     *
+     * 【做法】
+     * 拉起 ScreenCaptureRequestActivity（透明 Activity），由它：
+     *   1. 检查悬浮窗权限（后台启动 Activity 的前提）
+     *   2. 弹出系统截屏授权框
+     *   3. 把授权结果交给 OCRService 建立投屏会话
+     *   4. 通过静态回调通知本方法
+     *
+     * 【为什么要同步等待】
+     * 本方法运行在插件的后台线程里，需要"等用户点完授权"才能继续识别，
+     * 所以用 CountDownLatch 阻塞等待（带超时）。
+     * ⚠️ 绝不能在主线程这么做，否则 ANR。
+     *
+     * @param deadline 截止时间（毫秒时间戳），等待不会超过它
+     * @return true 表示截屏已可用
+     */
+    private boolean requestScreenCaptureIfNeeded(Context ctx, long deadline) {
+        // 再次确认（可能刚好在别的途径里授权好了）
+        if (OCRService.isScreenCaptureReady) {
+            return true;
+        }
+
+        // 先确保服务在跑：授权结果要交给服务去建立投屏会话
+        try {
+            Intent svc = new Intent(ctx, OCRService.class);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                ctx.startForegroundService(svc);
+            } else {
+                ctx.startService(svc);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "启动服务失败（继续尝试授权）: " + t);
+        }
+
+        final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+        final boolean[] granted = {false};
+
+        // 注册回调：Activity 拿到授权结果后会调用它
+        ScreenCaptureRequestActivity.setListener(ok -> {
+            granted[0] = ok;
+            latch.countDown();
+        });
+
+        // 拉起透明 Activity 去弹授权框。
+        // 需要 FLAG_ACTIVITY_NEW_TASK（从非 Activity 上下文启动 Activity 的硬性要求）。
+        try {
+            Intent req = new Intent(ctx, ScreenCaptureRequestActivity.class);
+            req.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            ctx.startActivity(req);
+            Log.i(TAG, "已拉起截屏授权界面，等待用户操作…");
+        } catch (Throwable t) {
+            Log.e(TAG, "拉起授权界面失败: " + t);
+            ScreenCaptureRequestActivity.setListener(null);
+            return false;
+        }
+
+        // 等待用户操作（最长等到 deadline，留 1 秒余量给后续识别）
+        long remain = deadline - System.currentTimeMillis() - 1000;
+        if (remain <= 0) {
+            Log.w(TAG, "剩余预算不足，无法等待授权");
+            ScreenCaptureRequestActivity.setListener(null);
+            return false;
+        }
+
+        try {
+            boolean done = latch.await(remain, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!done) {
+                Log.w(TAG, "等待截屏授权超时（" + remain + "ms）");
+                ScreenCaptureRequestActivity.setListener(null);
+                return false;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            ScreenCaptureRequestActivity.setListener(null);
+            return false;
+        }
+
+        Log.i(TAG, "截屏授权结果: " + granted[0]);
+        return granted[0];
     }
 
     /**
