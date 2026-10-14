@@ -59,6 +59,10 @@ ocr/
 
 本 App 是一个 **Tasker/Locale 兼容插件**，MacroDroid / Tasker 可直接调用。
 
+> 📖 **开发细节另见**：[MACRODROID_PLUGIN_GUIDE.md](MACRODROID_PLUGIN_GUIDE.md)
+> —— MacroDroid 没有官方插件文档，那份指南是反编译 MacroDroid + PP-OCRv6 插件
+> 得到的完整协议说明（常量表、能力位、异步回传机制、踩坑记录）。
+
 ### 配置步骤
 
 1. 新建宏 → 动作 → **Tasker/Locale Plugin**
