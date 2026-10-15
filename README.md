@@ -9,8 +9,8 @@
 
 | 层 | 说明 |
 |---|---|
-| 推理引擎 | 自编译 native 库（2 个 ABI），基于 PP-OCRv6 模型 |
-| 模型档位 | `tiny`（轻量）/ `small`（高精度）/ `rapid`（RapidOCR，含方向纠正） |
+| 推理引擎 | 自编译 native 库（2 个 ABI），基于 PP-OCRv6 模型；`rapid` 档改由 ML Kit 承担 |
+| 模型档位 | `tiny`（轻量，native）/ `small`（高精度，native）/ `rapid`（ML Kit 捆绑版，英文+中文） |
 | JNI 绑定 | 静态符号绑定，类名与方法签名须与 native 库一致 |
 | 服务与接口 | 前台服务 + 本地 HTTP（127.0.0.1:1666） |
 | 插件 | 完整实现 Tasker/Locale 协议，支持异步变量回传 |
@@ -46,12 +46,11 @@ ocr/
         │   ├── PluginEditActivity.java      插件配置界面
         │   └── PluginFireReceiver.java      插件执行入口（回传变量）
         ├── jniLibs/                  native 库（arm64-v8a / armeabi-v7a）
-        │   ├── */libnjocr.so         推理引擎（tiny/small/rapid 三档）
+        │   ├── */libnjocr.so         推理引擎（tiny/small 两档）
         │   └── */libc++_shared.so
         ├── assets/                   模型
         │   ├── det.* / rec.*         tiny 档
-        │   ├── small/                small 档
-        │   └── rapid/                RapidOCR 档（含 cls 方向分类）
+        │   └── small/                small 档
         └── res/                      图标与主题
 ```
 
@@ -144,7 +143,7 @@ Android 10+ 只允许拥有该权限的应用从后台启动 Activity。
 |---|---|
 | `path` | 图片绝对路径（需文件权限） |
 | `type` | `1`=纯文本　`2`=Json数组(含坐标)　`3`=详细Json(含矩形) |
-| `tier` | 可选：`tiny`（轻量，默认）/ `small`（高精度）/ `rapid`（RapidOCR）。切换后**持续生效** |
+| `tier` | 可选：`tiny`（轻量，默认）/ `small`（高精度）/ `rapid`（ML Kit，英文+中文）。切换后**持续生效** |
 | `action` | 可选：`setTier` 表示只切档位、不做识别 |
 
 > **不传 `path` 时自动截屏识别**（有 root 走 `screencap`，无需授权）。
@@ -156,13 +155,21 @@ Android 10+ 只允许拥有该权限的应用从后台启动 Activity。
 > |---|---|
 > | `tiny` | 最快，模型最小，字典 6904 |
 > | `small` | 字典 18708，保留更多标点/符号 |
-> | `rapid` | **RapidOCR**：clipper 精确后处理 + AngleNet 方向纠正 + 置信度 |
+> | `rapid` | **ML Kit 文字识别（捆绑版）**：模型随 APK 打包，**不需要 Google Play 服务、不联网下载**；英文 + 中文（中英混排），输出行级包围盒与置信度 |
 >
 > ⚠️ **不支持 `base64` 传图。** 原因：base64 会让请求体膨胀 33%，
 > 且服务端要先整块解码成字节数组再解码位图，一张 4K 图峰值内存可达 60MB+，
 > 低端机容易 OOM。改用 `path` 后由 `decodeFileSafe` 直接按需降采样，内存可控。
 
-- 响应：JSON 文本，成功 `{"status":200,...}`，失败 `{"status":400/404/500,"data":"Error: ..."}`
+- **状态码（修复⑨）**：HTTP 状态码与响应体里的 `status` **保持一致**。
+  例如图片不存在 → HTTP `404` **且** body `{"status":404,...}`；
+  模型尚在加载 → HTTP `503` **且** body `{"status":503,...}`。
+  于是 `curl -f`、Auto.js、OkHttp 等只看状态码的调用方也能正确判错。
+  > ⚠️ 唯一例外：`GET /last` **恒回 HTTP 200** —— 它是"探活"接口，
+  > 只要服务在监听就算通；"还没有识别记录"属于业务状态，写在 body 的 `status` 里。
+  > 插件路径（`PluginFireReceiver`）读的始终是 body 内的 `status`，不受影响。
+
+- 响应：JSON 文本，成功 `{"status":200,...}`，失败 `{"status":400/404/500/503,"data":"Error: ..."}`
 
 ### 调用示例
 
@@ -212,7 +219,7 @@ log(res.body.string());
 ### 行为说明
 
 - **有 root 的设备**：服务启动后自动启用 root 截屏（会先试拍一张确认可用），
-  `isScreenCaptureReady` 直接为 `true`，调用方**无需任何授权步骤**，
+  `screenCaptureReady` 直接为 `true`，调用方**无需任何授权步骤**，
   也不会出现系统录屏确认框。适合无人值守 / 自动化脚本场景。
 - **无 root 的设备**：需在 App 内点一次「开启截屏授权」。
 - 界面「屏幕截屏识别」卡片会显示当前走的哪条路径，
@@ -264,8 +271,15 @@ bash ./gradlew assembleDebug --console=plain
 1. 安装 APK，首次启动会申请「所有文件访问权限」。
 2. **打开 App 即自动启动 OCR 服务**（无需手动点启动）。
 3. 首次启动需在后台加载模型（约 1~3 秒），界面上方会显示服务状态。
+   > **冷启动行为（修复⑥）**：服务采用「HTTP 先上线、模型后台加载」，
+   > 因此**端口会立刻可连**（`GET /last` 秒回），但此时识别尚未可用：
+   > `POST /` 会返回 `503 {"status":503,...}`，`/last` 里的 `modelReady` 为 `false`。
+   > 插件会自动轮询等待模型就绪后再发识别请求，无需人工干预；
+   > 自己写脚本调用时，请以 `modelReady` 或 `503` 作为"稍后重试"的信号。
 4. 切到「在线调试」页，输入图片路径或选择图片，选择格式，点击 **开始识别**。
 5. 也可由自动化脚本直接调用 `127.0.0.1:1666`。
 
 > 界面只有「接口文档 / 在线调试」两个页签；服务随 App 启动自动运行。
-> 从最近任务划掉 App（进程结束）后，服务会随之停止，下次打开 App 自动恢复。
+> 注意：从最近任务划掉 App 时，本服务**不会**随之停止 —— 服务在 Manifest 中声明了
+> `android:stopWithTask="false"`，正是为了让外部自动化脚本的调用不因清理后台而中断。
+> 如需彻底停止，请在系统设置中「强行停止」应用，或调用系统停止服务接口。

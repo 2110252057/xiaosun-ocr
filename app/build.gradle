@@ -11,8 +11,11 @@ android {
         applicationId 'com.xiaosun.ocr'
         minSdk 24
         targetSdk 34
-        versionCode 3
-        versionName '2.1'
+        // 版本号统一为 1.0。
+        // 版本号唯一来源就是这里：MainActivity 通过 BuildConfig.VERSION_NAME 读取，
+        // 不再硬编码字符串，避免出现多处版本号不一致。
+        versionCode 1
+        versionName '1.0'
 
         // 仅保留 arm64-v8a 与 armeabi-v7a（已移除 x86_64）
         // 说明：native 库是预编译产物，放在 jniLibs/ 下直接打包，
@@ -23,7 +26,17 @@ android {
     }
 
     buildFeatures {
-        viewBinding true
+        // 【修复⑱】viewBinding 已关闭。
+        // 本项目的界面是**纯程序化构建**（MainActivity / PluginEditActivity
+        // 全部用 new TextView(this) 这种方式搭出来），res/layout 目录是空的，
+        // 全项目也没有任何一处引用 ViewBinding 生成的绑定类
+        // （grep 'ViewBinding' 结果为空）。
+        // 开着它只会白白多一趟 ViewBinding 代码生成任务，还容易让后来者
+        // 误以为"项目用了 XML 布局"。需要时再打开即可。
+        viewBinding false
+        // 开启后生成 BuildConfig，MainActivity 从中读取 VERSION_NAME / VERSION_CODE，
+        // 保证版本号只有 defaultConfig 这一个来源。
+        buildConfig true
     }
 
     compileOptions {
@@ -66,4 +79,18 @@ dependencies {
 
     // 仅用于把识别结果序列化成与原版一致的 JSON 文本
     implementation 'com.google.code.gson:gson:2.11.0'
+
+    // ==================== ML Kit 文字识别（捆绑版） ====================
+    // 【本档位的选择理由】见 OCRService.TIER_RAPID 处的注释。
+    //
+    // ★ 为什么是「捆绑版」而不是 Play Services 版
+    //   这两个 artifact 是 **bundled** 版本：模型随 APK 一起打包（约 +18MB），
+    //   运行期**完全不需要 Google Play 服务**，也不需要联网下载模型。
+    //   对比 com.google.android.gms:play-services-mlkit-text-recognition
+    //   （那种依赖设备上的 GMS，模型动态下载，国产 ROM / 无 GMS 设备上直接不可用）。
+    //
+    // ★ 语言范围：只做**英文 + 中文**（对应需求），不引入日/韩/梵文等其它脚本包，
+    //   以免 APK 无谓膨胀。拉丁包覆盖英文与数字标点，中文包覆盖简繁。
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'
 }

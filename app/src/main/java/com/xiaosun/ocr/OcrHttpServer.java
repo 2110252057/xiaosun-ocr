@@ -20,7 +20,7 @@ import fi.iki.elonen.NanoHTTPD;
 /**
  * 本地 HTTP 接口服务。
  *
- * 监听 127.0.0.1:1666，提供 OCR 识别能力给 App 内部与外部脚本/自动化工具。
+ * 监听 127.0.0.1:{@link OCRService#HTTP_PORT}，提供 OCR 识别能力给 App 内部与外部脚本/自动化工具。
  *
  * 路由：
  *   POST /                          识别（path 可选，不传则自动截屏）
@@ -39,7 +39,10 @@ public class OcrHttpServer extends NanoHTTPD {
     private final OCRService service;
 
     public OcrHttpServer(OCRService service) {
-        super("127.0.0.1", 1666);
+        // 端口统一引用 OCRService.HTTP_PORT。
+        // 原来这里又硬写了一遍 1666，一旦改端口就会出现
+        // "通知栏写着 A、实际监听 B" 的分裂，且 OcrHttpServer 与 MainActivity 各写各的。
+        super("127.0.0.1", OCRService.HTTP_PORT);
         this.service = service;
     }
 
@@ -54,44 +57,105 @@ public class OcrHttpServer extends NanoHTTPD {
         }
     }
 
+    /**
+     * body 内 status 与真实 HTTP 状态码的映射表。
+     *
+     * 【修复⑨】原来 json() / err() 无论内容如何都回 Response.Status.OK，
+     * 真正的错误码只写在 body 的 "status" 字段里。于是：
+     *   · curl -f / curl -sS 不会报错，脚本必须自己解析 JSON 才知道失败
+     *   · 多数 HTTP 组件（Auto.js、Tasker「HTTP 请求」、OkHttp 拦截器）
+     *     默认只看状态码，会把「图片不存在」「档位非法」全都当成功
+     * 现在两者一致：body 里写什么码，HTTP 状态码就是什么。
+     * 注意 body 里的 "status" 字段**必须保留** —— 插件路径
+     * （PluginFireReceiver）读的就是它，删掉会直接打断既有宏。
+     */
+    private static final Map<Integer, Response.Status> STATUS_MAP = new HashMap<>();
+
+    static {
+        STATUS_MAP.put(200, Response.Status.OK);
+        STATUS_MAP.put(400, Response.Status.BAD_REQUEST);
+        STATUS_MAP.put(403, Response.Status.FORBIDDEN);
+        STATUS_MAP.put(404, Response.Status.NOT_FOUND);
+        STATUS_MAP.put(405, Response.Status.METHOD_NOT_ALLOWED);
+        STATUS_MAP.put(500, Response.Status.INTERNAL_ERROR);
+        STATUS_MAP.put(503, Response.Status.SERVICE_UNAVAILABLE);
+    }
+
+    /**
+     * 规范化请求路径：只削掉结尾多余的 '/'（根路径 "/" 本身保留）。
+     *
+     * 这样 /ocr 与 /ocr/ 会走同一分支，不会因为调用方多打一个斜杠就 404。
+     */
+    private static String normalizePath(String uri) {
+        if (uri == null || uri.isEmpty()) {
+            return "/";
+        }
+        if (uri.length() > 1 && uri.endsWith("/")) {
+            return uri.substring(0, uri.length() - 1);
+        }
+        return uri;
+    }
+
     private Response handle(IHTTPSession session) {
         try {
             // ---------- 兜底路由：读取「上一次识别结果」 ----------
             // 给 MacroDroid 的「HTTP 请求」动作用。
             // 万一宿主的变量回传不生效，宏可以改成：
             //   1) 调插件触发识别
-            //   2) HTTP GET http://127.0.0.1:1666/last
+            //   2) HTTP GET http://127.0.0.1:{HTTP_PORT}/last   （端口 = OCRService.HTTP_PORT，此处仅示意）
             //   3) 从响应里取文字
-            String uri = session.getUri();
-            if (uri != null && uri.startsWith("/last")) {
+            // 【修复⑩：路由精确匹配】原来用 uri.startsWith("/last") /
+            // startsWith("/ocr") 做前缀匹配，于是 /lastxxx、/ocrfoo、/ocr123
+            // 全都会被误命中并返回 200，调用方把路径写错了却完全看不出来。
+            // 现在先规范化（去掉结尾多余 '/'），再按白名单精确比较。
+            String uri = normalizePath(session.getUri());
+            if ("/last".equals(uri)) {
                 // 支持 /last?format=text 直接返回纯文本，
                 // 方便 MacroDroid 的「HTTP 请求」动作把响应体整个塞进变量，
                 // 不用再做 JSON 解析。
                 //
                 // ★ 注意：NanoHTTPD 的 getUri() **不含 query string**，
                 //   所以不能在 uri 上找 "format=text"，必须读 session.getParms()。
+                //
+                // ★ 注意（修复⑨的例外）：/last 一律保持 HTTP 200。
+                //   原因：Http.ping() 就是靠 GET /last 是否返回 200 来判断
+                //   "服务是否在监听"。而"还没有任何识别记录"时 body 里是
+                //   status 404 —— 如果状态码也跟着变成 404，ping 就会把
+                //   "服务好好的、只是还没识别过" 误判成 "服务未就绪"，
+                //   插件将永远等不到就绪。所以这里用 jsonOk()，
+                //   真正的状态仍然如实写在 body 的 status 字段里。
                 if (isFormatText(session)) {
                     return newFixedLengthResponse(Response.Status.OK,
                             "text/plain;charset=utf-8", readLastText());
                 }
-                return json(readLastResult());
+                return jsonOk(readLastResult());
             }
 
             // ---------- 便捷路由：一步完成「截屏 + 识别 + 返回文本」 ----------
             // 专为 MacroDroid / Tasker 的「HTTP 请求」动作用。
             //
-            //   GET http://127.0.0.1:1666/ocr?format=text
+            //   GET http://127.0.0.1:{HTTP_PORT}/ocr?format=text
             //     → 自动截屏识别，直接返回纯文本
             //
-            //   GET http://127.0.0.1:1666/ocr?format=text&tier=rapid
+            //   GET http://127.0.0.1:{HTTP_PORT}/ocr?format=text&tier=rapid
             //     → 指定档位
             //
-            //   GET http://127.0.0.1:1666/ocr?format=text&path=/sdcard/a.png
+            //   GET http://127.0.0.1:{HTTP_PORT}/ocr?format=text&path=/sdcard/a.png
             //     → 识别指定图片
             //
+            // （{HTTP_PORT} 代指 OCRService.HTTP_PORT，此处仅为文档示意）
             // 这样宏里只要一个 HTTP 动作，不用装插件、不用管变量回传。
-            if (uri != null && uri.startsWith("/ocr")) {
+            if ("/ocr".equals(uri)) {
                 return handleOcrShortcut(session);
+            }
+
+            // 【修复⑩：404 兜底】精确匹配后，其余任何路径都不是合法路由。
+            // 原来没有这一段，未知路径会掉进下面的 POST 分支：
+            // GET /hello 会拿到 405（而不是 404），GET /lastxxx 会拿到 200，
+            // 调用方拼错路径时完全看不出问题。现在明确回 404。
+            if (!"/".equals(uri)) {
+                return json("{\"status\": 404, \"data\": \"Error: no such route '" + uri
+                        + "', available: POST /, GET /last, GET /ocr\"}");
             }
 
             if (session.getMethod() != Method.POST) {
@@ -188,6 +252,15 @@ public class OcrHttpServer extends NanoHTTPD {
                         + OCRService.tierName(OCRService.currentTier) + "\"}");
             }
 
+            // ① 模型还没加载好时明确回 503，而不是让调用方拿到一个
+            // 莫名其妙的错误（例如"截屏失败"，其实根因是模型没就绪）。
+            // 注意：仍走 json()，body 里的 status 字段保留，插件路径不受影响。
+            if (!OCRService.modelReady) {
+                String why = OCRService.modelError == null || OCRService.modelError.isEmpty()
+                        ? "模型仍在加载中，请稍候重试" : OCRService.modelError;
+                return json("{\"status\": 503, \"data\": \"Error: " + why + "\"}");
+            }
+
             Bitmap bitmap;
             if (path != null && path.length() > 0) {
                 File file = new File(path);
@@ -237,10 +310,12 @@ public class OcrHttpServer extends NanoHTTPD {
             OCRService.lastOcrImageWidth = bitmap.getWidth();
             OCRService.lastOcrImageHeight = bitmap.getHeight();
 
-            Log.i(TAG, "[OCR] type=" + type + ", size=" + bitmap.getWidth() + "x" + bitmap.getHeight());
+            Log.i(TAG, "[OCR] type=" + type + ", size=" + bitmap.getWidth() + "x" + bitmap.getHeight()
+                    + ", tier=" + OCRService.tierName(OCRService.currentTier));
             String result;
             try {
-                result = service.nativeProcessBitmap(bitmap, type);
+                // 统一入口：内部按当前档位分流到 native 或 ML Kit（rapid）
+                result = service.processBitmap(bitmap, type);
             } finally {
                 bitmap.recycle();
             }
@@ -351,8 +426,46 @@ public class OcrHttpServer extends NanoHTTPD {
         }
     }
 
+    /**
+     * 构造 JSON 响应。
+     *
+     * 【修复⑨】状态码不再恒为 200：从 body 的 "status" 字段里取出真实码，
+     * 映射成对应的 HTTP 状态码。取不到（或不是数字）时按 200 处理，
+     * 保证 native 直接返回的识别结果 JSON（status 可能就是 200）行为不变。
+     *
+     * 注意：body **原样返回**，不做任何改写 —— 插件路径读的就是 body 里的 status。
+     */
     private Response json(String body) {
+        return newFixedLengthResponse(statusOf(body), "application/json;charset=utf-8", body);
+    }
+
+    /**
+     * 构造"HTTP 层面一定成功"的 JSON 响应，body 里的 status 原样保留。
+     *
+     * 目前只给 /last 用：它是**探测型**接口，只要 HTTP 通了就算通，
+     * "有没有历史记录"属于业务状态，写在 body 里即可。
+     */
+    private Response jsonOk(String body) {
         return newFixedLengthResponse(Response.Status.OK, "application/json;charset=utf-8", body);
+    }
+
+    /** 从 body 里解析 "status" 字段并映射为 HTTP 状态；解析不出时视为 200。 */
+    private static Response.Status statusOf(String body) {
+        try {
+            JsonElement el = JsonParser.parseString(body);
+            if (el != null && el.isJsonObject()) {
+                JsonObject o = el.getAsJsonObject();
+                if (o.has("status") && o.get("status").isJsonPrimitive()) {
+                    int code = o.get("status").getAsInt();
+                    Response.Status mapped = STATUS_MAP.get(code);
+                    if (mapped != null) {
+                        return mapped;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return Response.Status.OK;
     }
 
     /** 只取上一次识别的纯文本（给 /last?format=text 用）。 */
@@ -424,7 +537,8 @@ public class OcrHttpServer extends NanoHTTPD {
             OCRService.lastOcrImageHeight = bitmap.getHeight();
             String result;
             try {
-                result = service.nativeProcessBitmap(bitmap, type);
+                // 统一入口：内部按当前档位分流到 native 或 ML Kit（rapid）
+                result = service.processBitmap(bitmap, type);
             } finally {
                 bitmap.recycle();
             }
@@ -469,10 +583,16 @@ public class OcrHttpServer extends NanoHTTPD {
         return false;
     }
 
-    /** 出错响应。 */
+    /**
+     * 出错响应。
+     *
+     * 【修复⑨】text 分支原来也回 200，导致 MacroDroid 的「HTTP 请求」动作
+     * 拿到的 HTTP 码永远是成功，脚本没法用状态码判断失败。
+     * 现在统一回 500（并保留 body 里的 "status": 500 供解析）。
+     */
     private Response err(boolean plainText, String msg) {
         if (plainText) {
-            return newFixedLengthResponse(Response.Status.OK,
+            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR,
                     "text/plain;charset=utf-8", "ERROR: " + msg);
         }
         return json("{\"status\": 500, \"data\": \"Error: " + msg + "\"}");
@@ -541,7 +661,17 @@ public class OcrHttpServer extends NanoHTTPD {
             android.content.SharedPreferences sp =
                     service.getSharedPreferences("xsocr_last", android.content.Context.MODE_PRIVATE);
             if (sp.getAll().isEmpty()) {
-                return "{\"status\":404,\"data\":\"还没有识别记录\"}";
+                // 【修复】空记录分支也要带上模型诊断字段。
+                // 否则"冷启动后模型还没加载好、又恰好还没识别过"时，
+                // 调用方（尤其是插件的就绪等待逻辑）根本读不到 modelReady，
+                // 只能盲等。这里让 /last 在任何情况下都能回答"引擎好了没"。
+                com.google.gson.JsonObject empty = new com.google.gson.JsonObject();
+                empty.addProperty("status", 404);
+                empty.addProperty("data", "还没有识别记录");
+                empty.addProperty("modelReady", OCRService.modelReady);
+                empty.addProperty("modelError",
+                        OCRService.modelError == null ? "" : OCRService.modelError);
+                return empty.toString();
             }
             String text = sp.getString(PluginContract.VAR_TEXT, "");
             String match = sp.getString(PluginContract.VAR_MATCH, "false");
@@ -562,6 +692,10 @@ public class OcrHttpServer extends NanoHTTPD {
             o.addProperty("time", time);
             o.addProperty("tier", tier);
             o.addProperty("timestamp", ts);
+            // 【修复】诊断字段：模型加载失败时接口原来只回空结果，
+            // 调用方完全看不出是"没文字"还是"引擎坏了"。现在一眼可判。
+            o.addProperty("modelReady", OCRService.modelReady);
+            o.addProperty("modelError", OCRService.modelError == null ? "" : OCRService.modelError);
             return o.toString();
         } catch (Throwable t) {
             return "{\"status\":500,\"data\":\"读取失败: " + t.getMessage() + "\"}";

@@ -25,6 +25,21 @@
     <!-- 唤醒锁：请求处理期间保持 CPU 清醒，防止息屏时响应超时 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!--
+      应用私有权限（签名级）。
+
+      【修复⑭】OCRService 是 exported=true 的（必须如此，否则自动化脚本
+      无法用 am start-foreground-service 拉起它），但原来**任何 App** 都能
+      随意开始/停止它。现在用它做一层调用者校验：
+        · 声明为 signature 级 —— 只有同签名的应用才拿得到这个权限
+        · 服务侧用 checkCallingPermission() 校验
+      于是：外部脚本用 am/shell 拉起照样成功（Uid 2000 系统/shell 不受限），
+      而第三方 App 的偷偷拉起/停止会被拒绝。不影响任何既有用法。
+    -->
+    <permission
+        android:name="com.xiaosun.ocr.permission.CONTROL_SERVICE"
+        android:protectionLevel="signature" />
+
     <!-- 屏幕截图（MediaProjection） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
@@ -50,14 +65,29 @@
 
     <application
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:extractNativeLibs="true"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="true">
+        android:theme="@style/AppTheme">
+        <!--
+          【修复⑬】备份范围收窄。
+          allowBackup 仍为 true（保留档位等常规偏好），但通过下面两个属性
+          显式排除 xsocr_last —— 它存着最近一次识别出的**全部屏幕文本**，
+          之前会被云备份/换机直传原样带走：
+            · fullBackupContent   → 覆盖 API ≤ 30
+            · dataExtractionRules → 覆盖 API ≥ 31（Android 12 起改用新文件）
+          两个属性只对应各自版本区间，都必须写。
+
+          【修复⑫】原 android:usesCleartextTraffic="true" 已移除，
+          改为 networkSecurityConfig 白名单式放行（默认禁明文，仅 127.0.0.1/localhost）。
+          这样本地 OCR 接口照常，而其它任何 http:// 明文请求都会被系统拦下。
+        -->
 
         <activity
             android:name=".MainActivity"
@@ -93,6 +123,11 @@
           与原版一致：导出的前台服务，供自动化脚本用 am start-foreground-service 拉起。
           stopWithTask=false：从最近任务划掉 App 时服务不被杀，外部调用不会中断。
           mediaProjection：支持不传图片、由接口自行截屏识别。
+
+          【修复⑭】服务侧已加调用者校验（见 OCRService.onStartCommand）：
+          exported 必须保持 true 才能被 am/shell 拉起，所以不能靠改 exported 收紧，
+          改为在 onStartCommand 里用 checkCallingPermission 校验：
+          系统 / shell（automation 脚本的发起者）不受限，第三方 App 会被拒绝。
         -->
         <service
             android:name=".OCRService"
@@ -105,11 +140,20 @@
                 android:value="OCR and Local Web Server for Automation" />
         </service>
 
-        <!-- 开机 / 应用更新后自动拉起服务 -->
+        <!--
+          开机 / 应用更新后自动拉起服务。
+
+          【修复⑭】exported 由 true 改为 false。
+          它监听的 BOOT_COMPLETED / MY_PACKAGE_REPLACED / QUICKBOOT_POWERON
+          都是**系统受保护广播**，只有系统能发送；而系统广播不受 exported
+          限制，所以改成 false 后功能完全不受影响，却顺手堵掉了
+          "第三方 App 自己伪造 BOOT_COMPLETED 来拉起本服务"这条路。
+          （Android 官方对"只收系统广播"的 receiver 也是这个建议。）
+        -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
@@ -125,6 +169,26 @@
                Activity          —— 响应 ACTION_EDIT_SETTING，负责配置界面
                BroadcastReceiver —— 响应 ACTION_FIRE_SETTING，负责实际执行
              ============================================================================ -->
+
+        <!--
+          【修复⑭：这两个组件的评估结论 —— 保持 exported=true，且不加权限】
+
+          它们必须导出，否则宿主（MacroDroid / Tasker）既拉不起配置界面，
+          也发不出执行广播，插件功能直接失效。
+
+          也不能像 OCRService 那样挂 signature 级权限：
+          宿主是**第三方应用、不同签名**，一旦加权限，
+          插件在所有宿主上都会静默失效（比不修还糟）。
+
+          所以这里按"零风险原则"处理，不为账面好看牺牲兼容性：
+            · OCRService   → 已加 isCallerAllowed() 调用者校验（exported 保持 true）
+            · BootReceiver → 已改为 exported=false（只收系统广播，零影响）
+            · 本组两组件   → 只能保持开放；其能力本身也有限
+                             （一个只是配置界面，一个只是触发识别），
+                             不涉及越权数据访问。
+          今后若要收紧，唯一可行方向是**包名白名单**，
+          但宿主不可枚举，会破坏兼容，故明确不做。
+        -->
 
         <activity
             android:name=".PluginEditActivity"

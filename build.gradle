@@ -6,5 +6,7 @@ plugins {
 }
 
 tasks.register('clean', Delete) {
-    delete rootProject.buildDir
+    // Gradle 9 已移除 Project.buildDir，改用 layout.buildDirectory（Provider<Directory>）。
+    // Delete.delete() 可直接接收 Provider，无需显式 .get()。
+    delete rootProject.layout.buildDirectory
 }

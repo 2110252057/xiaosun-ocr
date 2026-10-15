@@ -1,19 +1,21 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  数据提取规则（Android 12 / API 31+ 起取代 backup_rules.xml）。
+
+  【修复⑬】原来同样是模板注释、且 Manifest 未引用，
+  导致 xsocr_last（最近一次识别的**全部屏幕文本**）会被云备份和换机迁移带走。
+
+  这里在两条通道上都排除它：
+    · cloud-backup     —— 云备份
+    · device-transfer  —— 换机时的设备间直传
 -->
 <data-extraction-rules>
-  <cloud-backup>
-    <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
-  </cloud-backup>
-  <!--
+    <cloud-backup>
+        <!-- 识别结果缓存：含屏幕上的全部文字，不上云 -->
+        <exclude domain="sharedpref" path="xsocr_last.xml" />
+    </cloud-backup>
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!-- 换机直传同样排除 -->
+        <exclude domain="sharedpref" path="xsocr_last.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

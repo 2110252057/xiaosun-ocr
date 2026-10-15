@@ -10,6 +10,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.util.Locale;
 
 /**
  * Locale/Tasker 插件的「执行入口」。
@@ -61,6 +62,22 @@ public class PluginFireReceiver extends BroadcastReceiver {
 
     /** 快速探测超时（服务已在运行时，毫秒级就应返回）。 */
     private static final int PING_QUICK_MS = 300;
+
+    /**
+     * 「模型已就绪」判定的缓存有效期（毫秒）。
+     *
+     * 【为什么需要缓存】服务改成「HTTP 先上线、模型后台加载」之后，
+     * ping 通过只说明端口通了，并不代表能识别（要再看 /last 的 modelReady）。
+     * 但本方法每次都在宿主给的毫秒级预算里被调用，
+     * 不能再无条件多加一次 /last 往返 —— 冷启动时叠加探测很容易超预算。
+     * 折中：把"已确认就绪"缓存 2 秒，
+     *   同一批宏触发的多次检查只付一次探测成本；
+     *   超过 2 秒重新确认（那时服务早已启动完，探测是毫秒级）。
+     */
+    private static final long MODEL_READY_TTL_MS = 2000L;
+
+    /** 上次确认「模型已就绪」的时间戳（0 表示尚未确认过）。 */
+    private static volatile long modelReadyAt = 0L;
 
     /**
      * 去重窗口（毫秒）。
@@ -333,10 +350,26 @@ public class PluginFireReceiver extends BroadcastReceiver {
             return;
         }
 
+        // ---------- 1.2 模型就绪检查 ----------
+        // 【修复⑥的配套，很重要】
+        // 服务现在是「HTTP 先上线、模型后台加载」：ping 通过 ≠ 能识别。
+        // 冷启动时（服务刚被这段代码拉起）模型往往还在加载，
+        // 此时直接 POST 会拿到 503 "模型仍在加载中" —— 虽然是明确的错误，
+        // 但对用户来说仍然是"宏跑失败了"。
+        // 以前串行启动时模型几乎必然已好（因为 HTTP 最后才起），
+        // 所以这里必须把"等模型"这一步补上，否则修复⑥会带来行为回归。
+        if (!waitModelReadyUntil(deadline)) {
+            fail(vars, "OCR 引擎尚未就绪："
+                    + (OCRService.modelError == null || OCRService.modelError.isEmpty()
+                            ? "模型仍在加载中，请稍后重试"
+                            : OCRService.modelError));
+            return;
+        }
+
         // ---------- 1.5 截屏能力检查（仅「截屏」来源需要） ----------
         // 走「指定图片路径」时不涉及截屏，跳过。
         if (!PluginContract.SOURCE_PATH.equals(source)
-                && !OCRService.isScreenCaptureReady) {
+                && !OCRService.screenCaptureReady) {
             Log.i(TAG, "尚无截屏能力，尝试申请授权");
 
             boolean ok = requestScreenCaptureIfNeeded(ctx, deadline);
@@ -432,7 +465,8 @@ public class PluginFireReceiver extends BroadcastReceiver {
             int matchY = -1;
 
             if (arr != null) {
-                String wantLower = want.toLowerCase();
+                // 显式 Locale.ROOT，避免土耳其语环境下 I/ı 大小写折叠错误导致匹配失败
+                String wantLower = want.toLowerCase(Locale.ROOT);
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject item = arr.optJSONObject(i);
                     if (item == null) continue;
@@ -452,7 +486,7 @@ public class PluginFireReceiver extends BroadcastReceiver {
 
                     // 第一个命中的就用它，不再继续找
                     if (!matched && !wantLower.isEmpty()) {
-                        String textLower = text.toLowerCase();
+                        String textLower = text.toLowerCase(Locale.ROOT);
                         boolean hit = (matchMode == PluginContract.MODE_EXACT)
                                 ? textLower.equals(wantLower)
                                 : textLower.contains(wantLower);
@@ -571,7 +605,7 @@ public class PluginFireReceiver extends BroadcastReceiver {
      */
     private boolean requestScreenCaptureIfNeeded(Context ctx, long deadline) {
         // 再次确认（可能刚好在别的途径里授权好了）
-        if (OCRService.isScreenCaptureReady) {
+        if (OCRService.screenCaptureReady) {
             return true;
         }
 
@@ -658,6 +692,80 @@ public class PluginFireReceiver extends BroadcastReceiver {
                 Thread.sleep(Math.min(150L, remain));
             } catch (InterruptedException e) {
                 return Http.ping(PING_QUICK_MS);
+            }
+        }
+    }
+
+    /**
+     * 等「模型加载完成」，但最多等到 deadline。
+     *
+     * 【为什么需要它】服务已改成「HTTP 先上线、模型后台加载」，
+     * 于是 {@link Http#ping()} 通过（端口通了）**不再等于能识别**。
+     * 冷启动时若紧接着 POST，会拿到 503「模型仍在加载中」——
+     * 状态码虽然准确，但用户看到的是"宏跑失败"，属于修复⑥带来的行为回归。
+     * 本方法把"等模型"这一步补上。
+     *
+     * 【探测方式】GET /last 是纯读操作、毫秒级；响应体里带 modelReady，
+     * 加载失败时还有 modelError。失败属于**终局**，再等也没用，立即返回 false，
+     * 不必把预算白白耗光。
+     *
+     * 【成本控制】确认成功后把时间戳记进 modelReadyAt，TTL 内直接放行，
+     * 同一批宏触发的多次检查只付一次探测成本。
+     *
+     * 【已知的极小误差】若服务刚好在本 TTL 窗口内被重启，
+     * 可能出现"最多 2 秒的乐观误判"；此时 POST 会拿到 503 而被
+     * 解析成明确错误信息，不会静默失败，可以接受。
+     *
+     * @param deadline 截止时间（毫秒时间戳），等待不会超过它
+     * @return true 表示模型已就绪
+     */
+    private boolean waitModelReadyUntil(long deadline) {
+        while (true) {
+            // 1) TTL 命中：刚刚确认过，直接放行（省一次往返）
+            if (modelReadyAt > 0
+                    && (System.currentTimeMillis() - modelReadyAt) < MODEL_READY_TTL_MS) {
+                return true;
+            }
+
+            // 2) 问服务：/last 恒回 HTTP 200，body 里有 modelReady / modelError
+            String body = Http.get("/last", 800);
+            if (body != null) {
+                boolean ready = false;
+                boolean loadFailed = false;
+                String err = "";
+                try {
+                    JSONObject o = new JSONObject(body);
+                    ready = o.optBoolean("modelReady", false);
+                    err = o.optString("modelError", "");
+                    loadFailed = err != null && !err.isEmpty();
+                } catch (Throwable t) {
+                    // body 不是合法 JSON：理论上不该发生，当作"未确认"继续轮询
+                    Log.w(TAG, "解析 /last 响应失败: " + t);
+                }
+
+                if (ready) {
+                    modelReadyAt = System.currentTimeMillis();
+                    return true;
+                }
+                if (loadFailed) {
+                    Log.e(TAG, "模型加载失败（终局，不再等待）: " + err);
+                    return false;
+                }
+            }
+            // body == null：HTTP 层尚未完全就绪（ping 刚过，极少见），继续轮询
+
+            // 3) 还没好：按 deadline 轮询
+            long remain = deadline - System.currentTimeMillis();
+            if (remain <= 0) {
+                Log.w(TAG, "等待模型就绪超时（预算用尽）");
+                return false;
+            }
+            try {
+                Thread.sleep(Math.min(200L, remain));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                Log.w(TAG, "等待模型就绪被中断");
+                return false;
             }
         }
     }

@@ -91,7 +91,7 @@ public class ScreenCaptureRequestActivity extends Activity {
         }
 
         // 若已有可用截屏能力（root 或已授权），无需再弹框
-        if (OCRService.isScreenCaptureReady) {
+        if (OCRService.screenCaptureReady) {
             Log.i(TAG, "截屏已就绪，无需授权");
             notifyResult(true);
             finish();
@@ -186,7 +186,7 @@ public class ScreenCaptureRequestActivity extends Activity {
         h.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (OCRService.isScreenCaptureReady) {
+                if (OCRService.screenCaptureReady) {
                     Log.i(TAG, "投屏会话已就绪，回调插件继续识别");
                     notifyResult(true);
                     finish();

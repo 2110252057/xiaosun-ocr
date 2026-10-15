@@ -49,7 +49,7 @@ public class PluginEditActivity extends Activity {
     private EditText matchInput;
 
     private static final String[] SOURCES = {"截取当前屏幕", "指定图片路径"};
-    private static final String[] TIERS = {"tiny · 轻量（快）", "small · 高精度", "rapid · RapidOCR"};
+    private static final String[] TIERS = {"tiny · 轻量（快）", "small · 高精度", "rapid · ML Kit（最快）"};
     private static final String[] TYPES = {"纯文本", "含坐标（Json）"};
     /** 匹配方式：索引对应 MODE_CONTAINS / MODE_EXACT。 */
     private static final String[] MATCH_MODES = {"包含文本", "匹配文本（完全一致）"};

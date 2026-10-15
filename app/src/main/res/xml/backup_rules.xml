@@ -1,13 +1,22 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older that API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  备份规则（对应 Android 11 及以下的 android:fullBackupContent）。
+
+  【修复⑬】原来这个文件是模板注释、且 Manifest 里根本没有引用它
+  （既没有 android:fullBackupContent，只写了笼统的 allowBackup="true"），
+  结果是**全部** SharedPreferences 都会进云备份，其中包括：
+
+    xsocr_last —— 存着最近一次识别出来的**全部文本**。
+                  对用它识别聊天记录、验证码、工作文档的用户来说，
+                  这等同于把屏幕上最敏感的内容同步到了云端。
+
+  现在明确排除它，同时保留常规配置（档位偏好 xsocr_prefs）的备份，
+  升级/换机后用户的档位设置还能带过去。
+
+  注意：本文件在 API 31+ 上由 data_extraction_rules.xml 取代，
+  两者都要写，才能覆盖完整版本区间。
 -->
 <full-backup-content>
-  <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- 识别结果缓存：含屏幕上的全部文字，绝不外传 -->
+    <exclude domain="sharedpref" path="xsocr_last.xml" />
 </full-backup-content>

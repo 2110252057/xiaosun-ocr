@@ -43,17 +43,14 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 
 /**
  * 主界面。
  *
- * 打开 App 自动拉起本地 OCR 服务（127.0.0.1:1666）。
+ * 打开 App 自动拉起本地 OCR 服务（端口见 {@link OCRService#HTTP_PORT}）。
  * 两个页签：接口文档 / 在线调试
  *
  * 调试页：选中图片直接在预览框显示，识别后把检测框画在预览图上，
@@ -61,8 +58,14 @@ import java.net.URL;
  */
 public class MainActivity extends AppCompatActivity {
 
-    private static final String APP_VERSION = "v2.0.1";
-    private static final String LOCAL_URL = "http://127.0.0.1:1666";
+    // 版本号不再硬编码：直接取 app/build.gradle 中 defaultConfig 声明的 versionName。
+    // 从此版本号只有一个来源，不可能再出现多处不一致。
+    private static final String APP_VERSION = "v" + BuildConfig.VERSION_NAME;
+    // 【修复⑪】本机接口地址不再硬编码端口：直接复用 Http.URL_BASE，
+    // 而 Http.URL_BASE 又由 OCRService.HTTP_PORT 拼出。
+    // 于是"服务实际监听端口 / 通知栏文案 / 界面文档 / 客户端请求"四处
+    // 全部来自同一个常量，改端口只改一处。
+    private static final String LOCAL_URL = Http.URL_BASE;
     private static final int REQ_PICK_IMAGE = 1001;
     private static final int REQ_SCREEN_CAPTURE = 1002;
 
@@ -110,9 +113,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** 档位显示名（索引与 OCRService.TIER_* 对应）。 */
     private static final String[] TIER_LABELS = {
-            "tiny · 轻量（最快）",
+            "tiny · 轻量（快）",
             "small · 高精度",
-            "rapid · RapidOCR（方向纠正）",
+            "rapid · ML Kit（最快）",
     };
 
     /** 屏幕截图授权是否已就绪。 */
@@ -169,7 +172,7 @@ public class MainActivity extends AppCompatActivity {
         Runnable poll = new Runnable() {
             @Override
             public void run() {
-                boolean ready = OCRService.isScreenCaptureReady;
+                boolean ready = OCRService.screenCaptureReady;
                 captureReady = ready;
                 updateCaptureInfo();
                 // 已就绪，或已重试到上限（避免无限轮询）就停下
@@ -186,9 +189,9 @@ public class MainActivity extends AppCompatActivity {
         toast("正在检测 root 截屏…");
         new Thread(() -> {
             boolean rootOk = RootScreenCaptureManager.isRootAvailable();
-            boolean using = OCRService.isScreenCaptureReady && "root".equals(OCRService.captureMode);
+            boolean using = OCRService.screenCaptureReady && "root".equals(OCRService.captureMode);
             runOnUiThread(() -> {
-                captureReady = OCRService.isScreenCaptureReady;
+                captureReady = OCRService.screenCaptureReady;
                 updateCaptureInfo();
                 if (using) {
                     toast("root 截屏可用，已免去截屏授权");
@@ -447,7 +450,7 @@ public class MainActivity extends AppCompatActivity {
         addSectionTitle(parent, "调用示例");
 
         addCodeCard(parent, "截屏识别 · 不传图片", "// 服务端自动截取当前屏幕并识别（推荐）\n"
-                + "var res = http.post(\"http://127.0.0.1:1666\",\n"
+                + "var res = http.post(\"" + LOCAL_URL + "\",\n"
                 + "    { \"type\": \"2\" });\n"
                 + "log(res.body.string());\n\n"
                 + "// 有 root：直接可用，无需任何授权\n"
@@ -456,7 +459,7 @@ public class MainActivity extends AppCompatActivity {
         addCodeCard(parent, "Auto.js · 传路径", "// 截屏保存\nvar path = \"/sdcard/test.png\";\n"
                 + "if (!requestScreenCapture()) { toast(\"无权限\"); exit(); }\n"
                 + "sleep(1000);\ncaptureScreen(path);\n\n"
-                + "// 调用 OCR\nvar res = http.post(\"http://127.0.0.1:1666\",\n"
+                + "// 调用 OCR\nvar res = http.post(\"" + LOCAL_URL + "\",\n"
                 + "    { \"path\": path, \"type\": \"1\" });\n"
                 + "toast(res.body.string());");
 
@@ -464,11 +467,11 @@ public class MainActivity extends AppCompatActivity {
                 + "import \"http\"\nimport \"file\"\n\n"
                 + "local path = \"/sdcard/test.png\"\n"
                 + "snapshot(path, 0, 0, -1, -1)\n\n"
-                + "local url = \"http://127.0.0.1:1666\"\n"
+                + "local url = \"" + LOCAL_URL + "\"\n"
                 + "local postData = \"path=\" .. path .. \"&type=1\"\n"
                 + "local res = http.post(url, postData)\nprint(res)");
 
-        addCodeCard(parent, "Java", "URL url = new URL(\"http://127.0.0.1:1666\");\n"
+        addCodeCard(parent, "Java", "URL url = new URL(\"" + LOCAL_URL + "\");\n"
                 + "HttpURLConnection conn = (HttpURLConnection) url.openConnection();\n"
                 + "conn.setRequestMethod(\"POST\");\n"
                 + "conn.setRequestProperty(\"Content-Type\", \"application/json\");\n"
@@ -478,7 +481,7 @@ public class MainActivity extends AppCompatActivity {
                 + "// 读取 conn.getInputStream() 即为识别结果 JSON");
 
         addCodeCard(parent, "Python", "import requests\n\n"
-                + "r = requests.post(\"http://127.0.0.1:1666\",\n"
+                + "r = requests.post(\"" + LOCAL_URL + "\",\n"
                 + "                  json={\"path\": \"/sdcard/test.png\", \"type\": 1})\n"
                 + "print(r.text)");
 
@@ -496,7 +499,7 @@ public class MainActivity extends AppCompatActivity {
 
         addParamRow(card, "path", "图片绝对路径（需文件权限）");
         addParamRow(card, "type", "1 = 纯文本  ·  2 = Json 数组(含坐标)  ·  3 = 详细 Json(含矩形)");
-        addParamRow(card, "tier", "可选：tiny（轻量，默认）/ small（高精度）/ rapid（RapidOCR）。切换后持续生效");
+        addParamRow(card, "tier", "可选：tiny（轻量，默认）/ small（高精度）/ rapid（ML Kit，最快）。切换后持续生效");
 
         TextView note = new TextView(this);
         note.setText("不传 path 时，服务会自动截取当前屏幕后识别。\n"
@@ -907,7 +910,7 @@ public class MainActivity extends AppCompatActivity {
 
     /** 通过服务暴露的静态标志确认截屏是否真的就绪。 */
     private void probeCaptureReady() {
-        captureReady = OCRService.isScreenCaptureReady;
+        captureReady = OCRService.screenCaptureReady;
         updateCaptureInfo();
         if (captureReady) {
             toast("截屏授权已开启，现在可直接截屏识别");
@@ -978,7 +981,7 @@ public class MainActivity extends AppCompatActivity {
     /** 截屏后直接走本地接口识别。 */
     private void captureAndOcr() {
         // 先按服务的真实状态判断（root 可用时 captureReady 可能还没同步过来）
-        boolean readyNow = OCRService.isScreenCaptureReady;
+        boolean readyNow = OCRService.screenCaptureReady;
         if (!readyNow && !captureReady) {
             // 有 root 但还没探测完时，只提示等待，不要弹授权框
             if (RootScreenCaptureManager.isRootAvailable()) {
@@ -1058,12 +1061,11 @@ public class MainActivity extends AppCompatActivity {
         updateTierInfo();
         final String tierName = OCRService.tierName(tier);
         new Thread(() -> {
-            String resp = null;
-            try {
-                // action=setTier：只切档位、不做识别
-                resp = postJson("{\"tier\":\"" + tierName + "\",\"action\":\"setTier\"}");
-            } catch (Exception ignored) {
-            }
+            // 【修复⑪】统一走 Http.post（与插件/BroadcastReceiver 同一条实现），
+            // 不再保留 Activity 内那第二份几乎相同的 postJson。
+            // 超时与原 postJson 一致：连接 5s / 读取 30s。
+            String resp = Http.post(this,
+                    "{\"tier\":\"" + tierName + "\",\"action\":\"setTier\"}", 5000, 30000);
 
             // 以返回体里的 "tier=xxx" 为准，而不是含糊地找 status 200——
             // 后者一旦接口返回其它 200 响应就会误判成功。
@@ -1088,50 +1090,21 @@ public class MainActivity extends AppCompatActivity {
         }, "xsocr-tier").start();
     }
 
-    /** 发送一个 JSON body 到本地接口，返回响应文本（失败返回 null）。 */
-    private String postJson(String json) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(LOCAL_URL).openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(30000);
-            DataOutputStream out = new DataOutputStream(conn.getOutputStream());
-            out.write(json.getBytes("UTF-8"));
-            out.flush();
-            out.close();
-            int code = conn.getResponseCode();
-            InputStream is = (code >= 200 && code < 300)
-                    ? conn.getInputStream() : conn.getErrorStream();
-            if (is == null) return null;
-            StringBuilder sb = new StringBuilder();
-            byte[] buf = new byte[4096];
-            int n;
-            while ((n = is.read(buf)) > 0) sb.append(new String(buf, 0, n, "UTF-8"));
-            is.close();
-            return sb.toString();
-        } catch (Exception e) {
-            return null;
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
-    }
-
     /** 刷新档位说明文字。 */
     private void updateTierInfo() {
         if (tierInfo == null) return;
         String cur = OCRService.tierName(OCRService.currentTier);
         if (tierSwitching) {
-            tierInfo.setText("正在切换模型档位…（RapidOCR/small 首次加载需 1~3 秒）");
+            tierInfo.setText("正在切换模型档位…（small 首次加载需 1~3 秒）");
             return;
         }
         String detail;
         switch (OCRService.currentTier) {
             case OCRService.TIER_RAPID:
-                detail = "RapidOCR：标准 DB 后处理（clipper）+ AngleNet 方向分类，"
-                        + "能纠正倒置文字，并输出每块置信度。";
+                // 说明已随实现更新：rapid 不再是 native RapidOCR，而是 ML Kit。
+                detail = "ML Kit 文字识别（捆绑版，英文 + 中文）：模型随 APK 打包，"
+                        + "无需 Google Play 服务、不联网下载；中英混排与倾斜文字表现好，"
+                        + "输出行级包围盒与置信度。";
                 break;
             case OCRService.TIER_SMALL:
                 detail = "高精度档：字典 18708 字符，保留更多标点与符号。";
@@ -1516,53 +1489,28 @@ public class MainActivity extends AppCompatActivity {
     // ============================================================
 
     private String doHttpRequest(String path, int type) {
-        HttpURLConnection conn = null;
-        try {
-            // path 为空时不传任何图片参数，由服务端自行截屏识别
-            String json;
-            if (path == null || path.length() == 0) {
-                json = "{\"type\":" + type + "}";
-            } else {
-                json = "{\"path\":\"" + path.replace("\\", "\\\\") + "\",\"type\":" + type + "}";
-            }
-
-            conn = (HttpURLConnection) new URL(LOCAL_URL).openConnection();
-            conn.setRequestMethod("POST");
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setDoOutput(true);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(60000);
-
-            DataOutputStream out = new DataOutputStream(conn.getOutputStream());
-            out.write(json.getBytes("UTF-8"));
-            out.flush();
-            out.close();
-
-            int code = conn.getResponseCode();
-            InputStream is = (code >= 200 && code < 300)
-                    ? conn.getInputStream() : conn.getErrorStream();
-
-            StringBuilder sb = new StringBuilder();
-            if (is != null) {
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = is.read(buf)) > 0) {
-                    sb.append(new String(buf, 0, n, "UTF-8"));
-                }
-                is.close();
-            }
-            if (sb.length() == 0) {
-                return "{\"status\":" + code + ",\"data\":\"无返回内容，服务可能仍在加载模型\"}";
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "请求失败: " + e.getMessage()
-                    + "\n\n服务可能仍在加载模型，请稍等几秒后重试。";
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
+        // 【修复⑪】原来这里是一整份自写的 HttpURLConnection 实现，
+        // 与 Http.post() / postJson() 三份几乎重复，改动极易漏改。
+        // 现在统一复用 Http.post：
+        //   · 端口来自 OCRService.HTTP_PORT（唯一来源）
+        //   · 超时保持原值：连接 10s / 读取 60s（大图 + rapid 档确实慢）
+        // 返回 null（连接/读取失败）时再转成原来的提示文案，界面表现不变。
+        String json;
+        if (path == null || path.length() == 0) {
+            json = "{\"type\":" + type + "}";
+        } else {
+            json = "{\"path\":\"" + path.replace("\\", "\\\\") + "\",\"type\":" + type + "}";
         }
+
+        String resp = Http.post(this, json, 10000, 60000);
+        if (resp == null) {
+            return "请求失败：服务未响应"
+                    + "\n\n服务可能仍在加载模型，请稍等几秒后重试。";
+        }
+        if (resp.length() == 0) {
+            return "{\"status\": 200, \"data\": \"无返回内容，服务可能仍在加载模型\"}";
+        }
+        return resp;
     }
 
     // ============================================================

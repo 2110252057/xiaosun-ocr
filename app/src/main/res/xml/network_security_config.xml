@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置。
+
+  【修复⑫】原来是 android:usesCleartextTraffic="true"，等于**全局**放开明文 HTTP：
+  任何域名、任何地址都能用 http:// 明文传输，APK 一旦被静态扫描
+  （上架审核 / 安全扫描 / 企业 MDM）都会被直接标红。
+
+  本应用其实只需要一个明文目标：自己进程内的本地回环接口 127.0.0.1:1666
+  （OCR 服务）。所以改成白名单式：默认禁止明文，只对回环地址放行。
+
+  这样：
+    · 本地 OCR 接口照常工作（http://127.0.0.1:1666）
+    · 外部任何 http:// 请求都会被系统拦下，避免误用明文传出数据
+
+  注意：若今后要接入局域网内的调试服务器（例如 192.168.x.x），
+  需要在这里显式再加一个 <domain> 条目，否则会被拒绝。
+-->
+<network-security-config>
+    <!-- 默认：禁止明文（API 28+ 的默认行为，这里显式写出来便于阅读） -->
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!-- 例外：仅本地回环地址允许明文，用于内置 OCR HTTP 接口 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>
