@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
 
@@ -62,6 +63,37 @@
       （见 MainActivity 的「悬浮窗权限」引导）。
     -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!--
+      包可见性（Android 11+ / API 30+）。
+
+      ★ 为什么必须要
+      从 Android 11 起，应用默认只能「看见」自己、系统组件、以及少数
+      被显式声明过的包。targetSdk 34 的情况下，直接调用
+          getPackageManager().getApplicationIcon("com.tencent.mm")
+      对没声明过的包会抛 NameNotFoundException —— 表现就是菜单项里
+      填 app:com.tencent.mm 拿不到图标，预览框空着。
+
+      ★ 两个手段，同时用
+      1) QUERY_ALL_PACKAGES：一次性看得到所有已安装应用。
+         本应用是自用的手势/自动化工具（已声明 MANAGE_EXTERNAL_STORAGE），
+         不经过应用商店分发，用它是合适的。
+      2) <queries> 里的 MAIN/LAUNCHER intent：凡是带启动图标的 App 都
+         能响应这个 intent，于是它们全都可见。属于「即使拿不到上面那条
+         权限也能work」的兜底，两条路任一生效即可。
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- 常见目标应用，直接点名，最保险 -->
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.tencent.mobileqq" />
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -162,19 +194,36 @@
         </receiver>
 
         <!-- ==================== Tasker/Locale 插件（MacroDroid 兼容） ====================
-             MacroDroid 的「Tasker/Locale Plugin」动作会扫描设备上符合该规范的 App。
-             我们只要声明好这两个组件，就会出现在它的插件列表里。
+             MacroDroid 扫两份列表，认两套协议：
 
-             规范要点：
-               Activity          —— 响应 ACTION_EDIT_SETTING，负责配置界面
-               BroadcastReceiver —— 响应 ACTION_FIRE_SETTING，负责实际执行
-             ============================================================================ -->
+               「动作」列表 ← com.twofortyfouram.locale.intent.action.EDIT_SETTING
+               「触发器」列表 ← net.dinglisch.android.tasker.ACTION_EDIT_EVENT
+
+             ★ 关于「触发器」，只提供**事件**这一种身份。
+
+               插件本身在历史上也声明过 EDIT_CONDITION（条件身份），于是宿主
+               触发器列表里会同时出现「小孙OCR · 边缘滑动手势」与
+               「小孙OCR · 边缘滑动事件」两个条目，功能、配置界面完全一样，
+               差别只在事件身份附带防伪数据（随机 message id + 60 秒有效期），
+               条件身份只能读进程内的「最近一次手势」快照。
+
+               两个入口并列是纯粹的干扰 —— 用户不知道挑哪个，还可能两个都配
+               导致同一次滑动触发两遍。所以条件身份已撤除，只留事件：
+
+                 OcrActionConfigActivity   ← EDIT_SETTING     动作：识别屏幕文字
+                 TaskerEventConfigActivity ← ACTION_EDIT_EVENT 事件：等某个手势（带防伪）
+
+               两者都 alias 到同一个 PluginEditActivity，靠 Intent 的 action
+               区分显示哪套 UI（见 PluginEditActivity.applyMode）。
+               用 activity-alias 而不是各写一个 Activity：它们除"在列表里叫什么
+               名字"外完全一致，别名只多一行 android:label 就能各说各话。
+              ============================================================================ -->
 
         <!--
-          【修复⑭：这两个组件的评估结论 —— 保持 exported=true，且不加权限】
+          【修复⑭：本组组件的评估结论 —— 保持 exported=true，且不加权限】
 
           它们必须导出，否则宿主（MacroDroid / Tasker）既拉不起配置界面，
-          也发不出执行广播，插件功能直接失效。
+          也发不出执行/查询广播，插件功能直接失效。
 
           也不能像 OCRService 那样挂 signature 级权限：
           宿主是**第三方应用、不同签名**，一旦加权限，
@@ -183,22 +232,71 @@
           所以这里按"零风险原则"处理，不为账面好看牺牲兼容性：
             · OCRService   → 已加 isCallerAllowed() 调用者校验（exported 保持 true）
             · BootReceiver → 已改为 exported=false（只收系统广播，零影响）
-            · 本组两组件   → 只能保持开放；其能力本身也有限
-                             （一个只是配置界面，一个只是触发识别），
+            · 本组组件     → 只能保持开放；其能力本身也有限
+                             （配置界面、触发识别、回答"手势成立吗"），
                              不涉及越权数据访问。
           今后若要收紧，唯一可行方向是**包名白名单**，
           但宿主不可枚举，会破坏兼容，故明确不做。
         -->
 
+        <!--
+          配置界面本体。
+          ★ 它自己不挂任何 intent-filter —— 只作为两个别名的 targetActivity 存在。
+
+          为什么要这样收：此前它直接声明了 EDIT_CONDITION，于是宿主的
+          触发器列表里出现了「小孙OCR · 边缘滑动手势」（条件身份）。
+          但条件身份没有防伪数据，只能读进程内的「最近一次手势」快照，
+          理论上一条伪造广播就能骗过它；而事件身份带随机 message id +
+          60 秒有效期，是真的验过才认。两个入口功能一样、配置界面一样，
+          留着条件只会让人在列表里挑错，所以把条件身份去掉，
+          只留下面那个带防伪的事件别名。
+        -->
         <activity
             android:name=".PluginEditActivity"
             android:exported="true"
-            android:label="小孙OCR"
-            android:theme="@style/PluginDialogTheme">
+            android:theme="@style/PluginDialogTheme" />
+
+        <!--
+          动作身份：识别屏幕文字。
+
+          做成 alias 而不是写在本体上，只是为了**名字**：
+          本体没有自己的 label，动作别名在动作列表里叫「小孙OCR」，
+          事件别名在触发器列表里叫「小孙OCR · 边缘滑动事件」，
+          各说各话、不互相误导。两个身份共用同一个 Activity 类，代码零重复。
+
+          theme 也显式写死，避免 alias 继承行为在不同 ROM 上出现差异
+          （这类差异排查起来很费时间）。
+        -->
+        <activity-alias
+            android:name=".OcrActionConfigActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/PluginDialogTheme"
+            android:targetActivity=".PluginEditActivity">
             <intent-filter>
                 <action android:name="com.twofortyfouram.locale.intent.action.EDIT_SETTING" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <!--
+          事件身份：手势触发器。
+          必须用 activity-alias 且 target 指向配置界面 —— 这是原版
+          com.dxam.presencedetector 的做法（它也是 alias 到 PluginConfigActivity）。
+          alias 的 label 决定它在宿主「事件」列表里的显示名，
+          也就是用户在宏里看到的「小孙OCR · 边缘滑动事件」。
+        -->
+        <activity-alias
+            android:name=".TaskerEventConfigActivity"
+            android:exported="true"
+            android:label="@string/tasker_event_name"
+            android:theme="@style/PluginDialogTheme"
+            android:targetActivity=".PluginEditActivity">
+            <intent-filter>
+                <action android:name="net.dinglisch.android.tasker.ACTION_EDIT_EVENT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity-alias>
 
         <receiver
             android:name=".PluginFireReceiver"
@@ -208,6 +306,70 @@
             </intent-filter>
         </receiver>
 
-    </application>
+        <!--
+          条件查询的应答者。
+          ★ 名字容易让人误会：它**不只是**给「条件身份」用的。
+          真正的作用是：插件广播 REQUEST_QUERY 说「刚滑了一下」之后，
+          宿主会回头往这里发 QUERY_CONDITION 问「真的吗？哪个方向？」，
+          我们 setResultCode(16/17/18) 回答 —— 这条查询是宏被触发的起点。
+          没有它，事件型触发器就只是单向喊话，宏永远不跑。
+        -->
+        <receiver
+            android:name=".PluginConditionReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.twofortyfouram.locale.intent.action.QUERY_CONDITION" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ==================== 边缘滑动手势触发器 ====================
+             三个组件各司其职：
+               EdgeGestureActivity       —— 设置主页（总开关 / 触控区域 / 手柄列表）
+               EdgeGestureEditorActivity —— 单个手柄的编辑页（尺寸、颜色、8 方向、触发距离）
+               EdgeGestureService        —— 前台服务 + 悬浮窗手势引擎（真正抓触摸的地方）
+
+             为什么要用**悬浮窗**而不是普通 View：
+             手势要能覆盖在任意 App 之上（包括桌面、游戏），
+             只有 TYPE_APPLICATION_OVERLAY 窗口才拿得到跨应用触摸事件。
+             而 SYSTEM_ALERT_WINDOW 同时又让本应用被视为「用户可见」，
+             于是能顺理成章地从后台拉起前台服务（Android 12+ 限制）。
+
+             注意 EdgeGestureService 是 exported=false：
+              它只由本应用拉起，外部应用无权直接启动。
+              手势结果通过插件（Locale 协议）回传，不走对外广播。
+             ============================================================ -->
+        <activity
+            android:name=".EdgeGestureActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="边缘滑动触发" />
+        <activity
+            android:name=".EdgeGestureEditorActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="编辑滑动手柄" />
+        <!--
+          滑动菜单的配置页。
+          菜单由本应用自己弹（悬浮窗已经拿住了那次触摸），本页只负责
+          配置它长什么样：菜单项、图标、布局。宏只读回传的结果。
+        -->
+        <activity
+            android:name=".EdgeGestureMenuActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="滑动菜单" />
+        <service
+            android:name=".EdgeGestureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Edge Swipe Gesture Trigger" />
+        </service>
+
+</application>
 
 </manifest>

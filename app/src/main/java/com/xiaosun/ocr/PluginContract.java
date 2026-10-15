@@ -55,7 +55,28 @@ public final class PluginContract {
      */
     public static final int CAPABILITY_SETTING_RETURN_VARIABLES = 2;
 
-    /** 插件把要回传的变量放在这个 Bundle 里。 */
+    /**
+     * 插件把要回传的变量放在这个键下的 Bundle 里。
+     *
+     * 【为什么同时有两个键】
+     *
+     * 这是「事件触发器变量为空」那个 bug 的修复点之一。
+     *
+     * 键名来自 Tasker 官方规范（net.dinglisch.android.tasker.extras.VARIABLES），
+     * 已验证的样板是 AutoInput（com.joaomgcd.autoinput）——
+     * 它在 TaskerPlugin.smali 里定义了同一个常量：
+     *     EXTRA_VARIABLES_BUNDLE = "net.dinglisch.android.tasker.extras.VARIABLES"
+     * 两条回传路线用的都是这一个键：
+     *     · 有序广播路线：getResultExtras(true).putBundle(VARIABLES, vars)
+     *       （见 BroadcastReceiverTasker.setVariableBundleAsync）
+     *     · ResultReceiver 路线：receiver.send(code, bundle)
+     *       （见 IntentServiceQuery.getResultCodeFromConditionSatisfied）
+     *
+     * ⚠ 别在这里"多写几个候选键以防万一"：
+     *   变量键只有这一个，写同名的第二遍只是覆盖，写不同名的宿主也不认，
+     *   徒增误解。真正的兼容点在**回传通道**上（见类注释的
+     *   「变量回传」一节），不在键名上。
+     */
     public static final String EXTRA_VARIABLES_BUNDLE =
             TASKER_EXTRAS + "VARIABLES";
 
@@ -95,6 +116,35 @@ public final class PluginContract {
             TASKER_BASE + ".EXTRA_CALL_SERVICE_PACKAGE";
     public static final String EXTRA_CALL_SERVICE_FOREGROUND =
             TASKER_BASE + ".EXTRA_CALL_SERVICE_FOREGROUND";
+
+    /**
+     * 宿主在查询 Intent 里塞的 {@code ResultReceiver}，用来收回变量。
+     *
+     * ── 这个键是「事件触发器变量为空」的关键线索 ─────────────
+     *
+     * 值 = net.dinglisch.android.tasker.EXTRA_RESULT_RECEIVER
+     *
+     * 来自已验证样板 AutoInput（com.joaomgcd.autoinput）的
+     * com/joaomgcd/common/tasker/TaskerPlugin$Condition.smali：
+     *     EXTRA_RESULT_RECEIVER = "net.dinglisch.android.tasker.EXTRA_RESULT_RECEIVER"
+     *     getResultReceiver(intent) → intent.getParcelableExtra(该键)
+     *
+     * 它的 IntentServiceQuery 在应答时这样回变量：
+     *     ResultReceiver rr = TaskerPlugin.Condition.getResultReceiver(intent);
+     *     Bundle out = new Bundle();
+     *     ... 算出结果码，并把变量写进 out ...
+     *     rr.send(resultCode, out);        // ← 变量随 ResultReceiver 送回宿主
+     *
+     * ⚠ 这条路径与「有序广播 setResultExtras」是**两条独立通道**：
+     *    · 宿主用 sendOrderedBroadcast 发的 → 走 setResultExtras
+     *    · 宿主放了这个 ResultReceiver → 必须 rr.send()，setResultExtras 白写
+     *   我们已经把两条都做了，所以无论 MacroDroid 用哪条都能收到变量。
+     *
+     * 注意 Tasker 把结果码放在 send() 的第一个参数（而不是 Bundle 里），
+     * 所以 send() 的第一个参数就用 Locale 的 16/17/18。
+     */
+    public static final String EXTRA_RESULT_RECEIVER =
+            TASKER_BASE + ".EXTRA_RESULT_RECEIVER";
 
     // 结果码，取自 TaskerPlugin.Setting
     /** 成功。 */
@@ -143,9 +193,9 @@ public final class PluginContract {
      * 指定文本（可选）。
      *
      * 填了之后，会在识别结果里查找匹配的文本块：
-     *   %xsocr_match  → true / false
-     *   %xsocr_x/y    → 命中的文本块坐标（左上角，整数）
-     * 没填则 %xsocr_match 为 false，坐标固定 -1。
+     *   匹配文本     true / false
+     *   坐标X/Y      命中的文本块坐标（左上角，整数）
+     * 没填则「是否找到」为 false，坐标固定 -1。
      */
     public static final String KEY_MATCH_TEXT = "matchText";
 
@@ -182,6 +232,168 @@ public final class PluginContract {
     /** 使用的档位。 */
     public static final String VAR_TIER = VARIABLE_PREFIX + "xsocr_tier";
 
+    // ---------- 滑动菜单的选中结果（由 EdgeGestureService 提供） ----------
+    //
+    // 【为什么只留这三个、手势本身的变量全删了】
+    //
+    // 手势方向 / 序号 / 时间 / 手柄这些原先也回传，但它们有两个问题：
+    //   · 用户在 MacroDroid 里本来就自己建变量接值，名字由用户定，
+    //     我们这边硬编码一串名字只是"建议"，反而像是强制的；
+    //   · 判断"是不是我要的那个方向"这件事，插件在收到查询时已经
+    //     用配置里的方向比过了（不匹配就直接回 17、宏根本不跑），
+    //     宏再自己判断一遍是重复劳动。
+    //
+    // 而菜单这三项不一样：它们是**用户的输入**，宏不可能自己知道
+    // 用户点了哪一项，必须由插件告诉它。所以只留这三项。
+    //
+    // 内部的方向匹配逻辑（EdgeGesturePrefs.gsLastDirection 等）
+    // 仍然保留 —— 那是插件自己用来决定"要不要触发"的，不对外。
+    // ==================== 触发器（Tasker 事件）协议 ====================
+    //
+    // 宏的「触发器」列表要的是 **事件** 协议，跟「动作」是两套东西：
+    //
+    //   动作 (Setting)：EDIT_SETTING   → 配置界面
+    //                   FIRE_SETTING   → 执行（见 PluginFireReceiver）
+    //   事件 (Event)：   ACTION_EDIT_EVENT → 配置界面（Tasker 扩展）
+    //                    插件主动发 REQUEST_QUERY 告诉宿主「刚发生了」
+    //                    QUERY_CONDITION   宿主回头来问「真的吗」
+    //
+    // ★ 关键：宿主默认**不知道**事件什么时候发生。
+    //   是插件在事情发生的那一刻，主动广播一条 REQUEST_QUERY 出去，
+    //   宿主收到后回头用 QUERY_CONDITION 来问插件，插件回 16/17 表示成立与否。
+    //   这就是「边缘滑动 → 立刻让宏跑起来」的全部机制。
+    //
+    // ★ 本插件不提供**条件（Condition / EDIT_CONDITION）身份**。
+    //   条件与事件的配置界面、功能完全一样，唯一差别是事件携带防伪数据
+    //   （随机 message id + 60 秒有效期），条件只能读进程内的
+    //   「最近一次手势」快照、理论上可被伪造广播骗过。
+    //   两个入口并列只会让人挑错，故只保留事件。
+    //   （历史的 MODE_STATE 分支与 PluginEditActivity 上的
+    //     EDIT_CONDITION intent-filter 已一并删除。）
+    //
+    // 参照实现：com.dxam.presencedetector（人在检测插件）
+    //   · TaskerEventConfigActivity  —— activity-alias，label 为「Tasker 事件」名
+    //   · LocaleConditionReceiver    —— 响应 QUERY_CONDITION，回 16/17/18
+    //   · PresenceRepository.publish —— 状态变化时广播 REQUEST_QUERY
+    /** Tasker 专用：宿主打开「事件」配置界面。 */
+    public static final String ACTION_EDIT_EVENT =
+            TASKER_BASE + ".ACTION_EDIT_EVENT";
+    /** 宿主询问条件当前是否成立（有序广播，插件用 setResultCode 回答）。 */
+    public static final String ACTION_QUERY_CONDITION =
+            "com.twofortyfouram.locale.intent.action.QUERY_CONDITION";
+    /**
+     * ★ 插件主动上报：「我这边有事发生了，快来问我」。
+     *
+     * 插件在事件发生瞬间发这个隐式广播，并带上
+     * {@link #EXTRA_ACTIVITY} 指明是哪个组件（即"哪个配置实例"）发生了事。
+     * 宿主随后会对该组件发 QUERY_CONDITION。
+     */
+    public static final String ACTION_REQUEST_QUERY =
+            "com.twofortyfouram.locale.intent.action.REQUEST_QUERY";
+    /** 上报时用来指明「是哪个组件的实例」，值 = 组件全限定类名。 */
+    public static final String EXTRA_ACTIVITY =
+            "com.twofortyfouram.locale.intent.extra.ACTIVITY";
+    // 条件查询结果码（沿用 Locale 规范的三个值）
+    /** 条件成立。 */
+    public static final int RESULT_CONDITION_SATISFIED = 16;
+    /** 条件不成立。 */
+    public static final int RESULT_CONDITION_UNSATISFIED = 17;
+    /** 说不清（插件没初始化 / 配置缺失 / 消息过期）。 */
+    public static final int RESULT_CONDITION_UNKNOWN = 18;
+    // ==================== Tasker 事件防伪 ====================
+    //
+    // 光靠 REQUEST_QUERY 有个漏洞：任何 App 都能伪造这条广播，
+    // 于是宏会在用户没滑屏的时候被触发。
+    //
+    // 解法（照抄原版 TaskerEventProtocol）：
+    //   上报时附带一个**随机 message id** + 我们对它的签发时间；
+    //   宿主来查询时把这个 id 原样带回来，我们核对：
+    //     ① id 必须是我们签发过的（存在表里）
+    //     ② 签发时间距今不超过 60 秒
+    //   两条都满足才认，于是重放/伪造都过不了。
+    /** 上报与查询之间传递业务数据（含 message id）的 Bundle。 */
+    public static final String EXTRA_PASS_THROUGH_DATA =
+            TASKER_EXTRAS + "PASS_THROUGH_DATA";
+    /** 防伪用的随机消息号（Integer，放在 PASS_THROUGH_DATA 里）。 */
+    public static final String EXTRA_MESSAGE_ID = TASKER_BASE + ".MESSAGE_ID";
+    /** 消息有效期：60 秒，超时视为伪造。 */
+    public static final long MESSAGE_VALID_MS = 60000L;
+    /** 防重放表最多记 100 条。 */
+    public static final int MAX_RECENT_MESSAGES = 100;
+    // ==================== 我们自己的 Bundle key（条件/事件共用） ====================
+    /** 这条配置属于「动作 / 条件 / 事件」。 */
+    public static final String KEY_PLUGIN_MODE = "plugin_mode";
+    /** 动作（Setting）：识别屏幕文字。 */
+    public static final String MODE_SETTING = "setting";
+    /** 条件（Condition）：等某个手势。★ 已废弃，仅为兼容老配置而保留字段。 */
+    public static final String MODE_STATE = "state";
+    /** Tasker 事件（Event）：等某个手势，额外做防伪校验。 */
+    public static final String MODE_EVENT = "event";
+    /**
+     * 事件模式下：监听哪个方向。
+     *
+     * 空字符串 = 任意方向（8 个方向都认）。
+     * 否则取 {@code EdgeGesturePrefs.DIR_KEYS} 里的值，如 "right"。
+     */
+    public static final String KEY_GS_DIR = "gs_dir";
+    /** 事件模式下：是否校验消息新鲜度（默认 true，防重放）。 */
+    public static final String KEY_GS_STRICT = "gs_strict";
+
+    // ==================== 手势菜单（宏 → 插件 推配置） ====================
+    //
+    // 【为什么需要这条通道】
+    // 「滑过阈值 → 菜单弹出 → 手指不离开 → 滑到图标上 → 抬手即选中」
+    // 这个交互，**弹菜单这件事必须由插件自己做**，原因在输入分发机制：
+    //
+    //   手指 ACTION_DOWN 那一刻，系统就把整条触摸序列绑定给了当时命中的
+    //   那个窗口。此后直到抬手，所有 MOVE / UP 只投递给它 —— 中途新弹出来
+    //   的窗口一个事件都收不到。
+    //
+    //   所以「插件探到手势 → 广播叫宏弹窗 → 宏新建一个窗口」这条路走不通：
+    //   宏新建的窗口收不到 MOVE（无法跟手高亮），也收不到 UP（无法判定选中，
+    //   菜单还会永远关不掉）。而且宏侧的一次性 Java 动作根本没法常驻等事件。
+    //
+    // 【正确做法：同一个窗口原地长大】
+    //   插件把**已经被绑定的那个手柄窗口**用 updateViewLayout 改成全屏，
+    //   再自绘菜单。窗口 token 不变 → 触摸序列不中断 → MOVE/UP 照收。
+    //   全程没有任何跨窗口转交，也就没有上面那个问题。
+    //
+    //   因此职责划分是：
+    //     宏   ── 只负责「菜单长什么样」（推配置），以及「选中后干什么」
+    //     插件 ── 弹菜单、跟手高亮、判定选中，最后把索引回传
+    //
+    // 【时序】
+    //   滑过阈值 → 插件展开菜单（此时**不发**广播，宏还不知道）
+    //   手指滑动 → 跟手高亮
+    //   抬手     → 插件记录选中项，**此时才**发 REQUEST_QUERY 触发宏
+    //   宏读菜单索引变量分支执行
+    //
+    //   所以宏那边感知到触发的时刻，与手指抬起的时刻是一致的 ——
+    //   这就是为什么宏里可以紧接着就执行动作，不存在「手指还按着」的问题。
+
+    // 这里曾经还有一条「向下配置」通道：
+    //   ACTION_MENU_CONFIG = "com.xiaosun.ocr.action.MENU_CONFIG"
+    // 以及配套的 EXTRA_MENU_ENABLED / EXTRA_MENU_ITEMS /
+    // EXTRA_MENU_ICON_DP / EXTRA_MENU_SHOW_TEXT / EXTRA_MENU_LAYOUT。
+    // 用途是让宏把菜单定义推给插件。
+    //
+    // 已整体撤除，理由：
+    //   · 菜单现在在本应用自己的设置页里配（EdgeGestureMenuActivity），
+    //     有图标预览、可排序、能选图片 —— 比在宏里拼字符串可靠得多；
+    //   · 让宏去描述「菜单长什么样」属于职责错位：宏擅长的是
+    //     「发生了就做什么」，不是配置界面；
+    //   · 少一条 exported 的写配置入口，攻击面也小一些。
+    // 于是协议只剩「向上回传结果」这一个方向，见下。
+
+    // ==================== 手势菜单（插件 → 宏 回传结果） ====================
+
+    /** 选中项索引；-1 = 选中了「设置」项或滑到空白处取消。 */
+    public static final String VAR_MENU_INDEX = VARIABLE_PREFIX + "xsocr_menu_index";
+    /** 选中项的显示文字（取消时为空）。 */
+    public static final String VAR_MENU_TEXT = VARIABLE_PREFIX + "xsocr_menu_text";
+    /** 选中项的 source / 动作串（取消时为空）。 */
+    public static final String VAR_MENU_ACTION = VARIABLE_PREFIX + "xsocr_menu_action";
+
     // ==================== 工具方法 ====================
 
     /** 宿主是否声明支持「返回变量」。 */
@@ -192,9 +404,57 @@ public final class PluginContract {
         return ((Integer) flags & CAPABILITY_SETTING_RETURN_VARIABLES) > 0;
     }
 
-    /** 把变量 Bundle 放进广播结果里，宿主会去读它。 */
+    /**
+     * 组装要回传给宏的变量。
+     *
+     * 内容只有**滑动菜单的选中结果**三项：这是用户的输入，
+     * 宏不可能自己知道用户点了哪一项。
+     *
+     * （手势方向 / 序号 / 时间 / 手柄已不再回传：方向匹配由插件
+     *   在应答查询时就做了，不匹配的宏根本不会被触发，宏侧无需再判；
+     *   其余几项属于调试信息，宏里用不到。用户在 MacroDroid 里
+     *   自行建变量接值，名字由用户定。）
+     *
+     * ── 谁在用 ──────────────────────────────────
+     * 现在只有事件触发器这一条路（PluginConditionReceiver 应答
+     * QUERY_CONDITION 时调用）。动作路径（PluginFireReceiver）
+     * 是纯识别，不再回传任何手势/菜单上下文 —— 菜单选中项是
+     * 「触发器」场景的产物，跟「宏主动调一次 OCR」无关。
+     *
+     * 数据源是 EdgeGesturePrefs 的静态快照（抬手那一刻记下的），
+     * 不是实时状态。
+     *
+     * 全程 try/catch：变量缺失不该让整个查询应答失败。
+     */
+    public static android.os.Bundle buildMenuVars() {
+        android.os.Bundle vars = new android.os.Bundle();
+        try {
+            // index 用 putInt：语意上它是数字。
+            // ⚠ 读取方别再调 getString()，会抛 ClassCastException，要读用 get()。
+            // 没配菜单时 menuIndex 恒为 -1，宏侧读到 -1 即表示
+            // 「这次不是菜单选项触发的」。
+            vars.putInt(VAR_MENU_INDEX, EdgeGesturePrefs.menuIndex);
+            String mtext = EdgeGesturePrefs.menuText;
+            vars.putString(VAR_MENU_TEXT, mtext == null ? "" : mtext);
+            String mact = EdgeGesturePrefs.menuAction;
+            vars.putString(VAR_MENU_ACTION, mact == null ? "" : mact);
+        } catch (Throwable t) {
+            android.util.Log.w("XSOCR-Plugin", "组装回传变量失败: " + t);
+        }
+        return vars;
+    }
+
+    /**
+     * 把变量 Bundle 放进广播结果里，宿主会去读它。
+     *
+     * 【为什么必须 getResultExtras(true) 传 true】
+     * 拿到的是宿主那一侧的**同一个实例**，往里 put 才会被读到；
+     * 自己 new 一个 Bundle 是另一份对象，写了也传不回去。
+     * （AutoInput 的 setVariableBundleAsync 正是这么做的。）
+     */
     public static void addVariableBundle(android.os.Bundle resultExtras,
                                          android.os.Bundle variables) {
+        if (resultExtras == null || variables == null) return;
         resultExtras.putBundle(EXTRA_VARIABLES_BUNDLE, variables);
     }
 
@@ -237,7 +497,32 @@ public final class PluginContract {
     };
 
     /**
-     * 以「整数」形式回传的变量：%xsocr_x、%xsocr_y。
+     * 「触发器」模式下的变量声明（只含菜单结果）。
+     *
+     * 触发器配置界面用它预告变量，理由和 ALL_VARIABLES 一样：
+     * 宿主要先知道有哪些变量，用户才能在宏里把它们映射到自己的变量上。
+     *
+     * 【为什么只有菜单三项】
+     * 触发器场景里没有 OCR 识别，把识别文本 / 坐标那几项列出来
+     * 只会让人以为配个手势还要配图片路径。
+     * 而手势方向 / 序号 / 时间 / 手柄也不再列 —— 方向匹配插件已经做了，
+     * 其余是调试信息；用户在 MacroDroid 里自行建变量接值，名字由用户定。
+     * 留菜单三项是因为「用户点了哪一项」只有插件知道。
+     */
+    public static final String[] MENU_VARIABLES = {
+            VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始；-1 = 取消或未启用菜单）",
+            VAR_MENU_TEXT   + "\n菜单文字\n选中项的显示文字（取消时为空）",
+            VAR_MENU_ACTION + "\n菜单动作\n选中项的动作串（取消时为空）",
+    };
+
+    /** 触发器模式下的变量预告（只含菜单结果）。 */
+    public static void addMenuVariableList(android.content.Intent intentToHost) {
+        if (intentToHost == null) return;
+        intentToHost.putExtra(EXTRA_RELEVANT_VARIABLES, MENU_VARIABLES);
+    }
+
+    /**
+     * 以「整数」形式回传的变量：坐标 X、坐标 Y。
      *
      * 实现方式是在 Bundle 里用 putInt() 而不是 putString()。
      * 宿主侧（MacroDroid 的 t6g.b）会用 toString() 统一转成字符串，
@@ -327,6 +612,8 @@ public final class PluginContract {
 
             completion.putExtra(EXTRA_RESULT_CODE, resultCode);
             if (variables != null) {
+                // signalFinish 是把变量挂在一个 Intent 上（不是广播结果 Bundle），
+                // 所以这里不能复用 addVariableBundle()，得 putExtra。
                 completion.putExtra(EXTRA_VARIABLES_BUNDLE, variables);
             }
 

@@ -84,17 +84,36 @@ public class MainActivity extends AppCompatActivity {
     private static final int C_CODE_BG = 0xFF1E2029;
     private static final int C_CODE_TEXT = 0xFFC8D0E0;
 
-    private final String[] tabs = {"接口文档", "在线调试"};
-
+    // 【新增】第三个页签：边缘滑动手势触发器。
+    private final String[] tabs = {"接口文档", "在线调试", "滑动触发"};
     private LinearLayout contentContainer;
-    private final View[] tabViews = new View[2];
-    private final TextView[] tabTexts = new TextView[2];
+    // 长度跟随 tabs，避免以后加页签时数组越界。
+    private final View[] tabViews = new View[tabs.length];
+    private final TextView[] tabTexts = new TextView[tabs.length];
+    /** 「滑动触发」页的状态文字（服务未运行时为 null）。 */
+    private TextView tvGestureState;
 
     private TextView tvStatusDot;
     private TextView tvStatusText;
+    /** 状态卡副标题（接口地址）。关闭时它不该继续显示一个没人监听的地址。 */
+    private TextView tvStatusSub;
     private TextView tvBatteryText;
     private View batteryCard;
     private boolean serviceStarting = false;
+    /**
+     * 「手势正在启动…」状态的重试计数与开关。
+     *
+     * 服务的 gsRunning 是在 onStartCommand（主线程）里翻的，
+     * 而页面构建几乎总发生在它之前，所以刚进这一页看到的必然是「正在启动…」。
+     * 留几次重试让它自己变成「运行中」，否则用户会以为服务根本没起来。
+     * 具体计数放在延迟任务自己身上，这里只需要一个「是否已有链在排」的标志。
+     */
+    private boolean gestureRecheckPending = false;
+    /** 延迟刷新状态用的 Handler。 */
+    private android.os.Handler gestureRecheckHandler;
+    /** 重试间隔与次数：12 × 500ms = 6 秒，足够系统把服务拉起来。 */
+    private static final int GESTURE_RECHECK_MAX = 12;
+    private static final int GESTURE_RECHECK_INTERVAL = 500;
 
     // 调试页状态
     private ImageView previewImage;
@@ -156,6 +175,17 @@ public class MainActivity extends AppCompatActivity {
         ensureServiceRunning();
         // 回到前台刷新截屏方式（root 探测在服务里异步完成）
         refreshCaptureMode();
+        /*
+         * 手势服务在这里再主动拉一次。
+         *
+         * 光靠 START_STICKY 不够：服务被系统重启过一次之后
+         * （dumpsys 里 restartCount=1、lastActivity==restartTime），
+         * 就再也没有任何代码主动拉过它，手柄也就一直不出现。
+         * sync() 会按总开关决定起还是停，是幂等的。
+         */
+        EdgeGestureService.sync(this);
+        // 从手势设置页返回、或刚被划掉后重新进来时，开关/权限/运行状态可能都变了。
+        refreshGestureState();
     }
 
     /**
@@ -324,6 +354,7 @@ public class MainActivity extends AppCompatActivity {
         contentContainer.removeAllViews();
         tvStatusDot = null;
         tvStatusText = null;
+        tvStatusSub = null;
         tvBatteryText = null;
         batteryCard = null;
         previewImage = null;
@@ -334,11 +365,15 @@ public class MainActivity extends AppCompatActivity {
         etPath = null;
         tierSpinner = null;
         tierInfo = null;
-
+        // 切页时把还排着的状态重试链掐掉：旧页面马上就不存在了，重试没有意义。
+        cancelGestureRecheck();
+        tvGestureState = null;
         if (index == 0) {
             buildDocPage(contentContainer);
-        } else {
+        } else if (index == 1) {
             buildDebugPage(contentContainer);
+        } else {
+            buildGesturePage(contentContainer);
         }
         refreshStatus();
     }
@@ -361,6 +396,11 @@ public class MainActivity extends AppCompatActivity {
     // ============================================================
 
     private void ensureServiceRunning() {
+        // 开关关了就不主动拉起 —— 这正是「只用滑动手势」的人要的：
+        // 打开 App 不再顺带把他不用的 OCR 服务和模型载进内存。
+        if (!OCRService.isEnabled(this)) {
+            return;
+        }
         if (OCRService.isRunning || serviceStarting) {
             return;
         }
@@ -382,14 +422,47 @@ public class MainActivity extends AppCompatActivity {
         refreshStatus();
     }
 
+    /**
+     * 开关没开时给一句明确提示。
+     *
+     * 【为什么需要它】
+     * 关闭开关后，{@link #ensureServiceRunning()} 会直接返回（这是有意的），
+     * 于是所有依赖本地接口的操作都会以「连接失败」收场 ——
+     * 用户看到的是网络错误，根本想不到是自己在设置里关掉了服务。
+     * 这种「静默失败」最难自查，所以入口处一律先拦一次、说清原因。
+     *
+     * @return true 表示服务可用、可以继续；false 表示已提示并应中止。
+     */
+    private boolean warnIfOcrDisabled() {
+        if (OCRService.isEnabled(this)) {
+            return true;
+        }
+        toast("OCR 服务已在设置里关闭 —— 先打开「启用 OCR 服务」");
+        return false;
+    }
+
     private void refreshStatus() {
+        boolean enabled = OCRService.isEnabled(this);
         boolean ready = OCRService.isRunning;
         if (tvStatusDot != null) {
-            tvStatusDot.setBackgroundResource(ready ? R.drawable.dot_ok : R.drawable.dot_warn);
+            // 只有「开着且真的跑起来了」才是绿点；
+            // 关闭状态和一个正在加载的黄点视觉上就不该混淆。
+            tvStatusDot.setBackgroundResource(
+                    enabled && ready ? R.drawable.dot_ok : R.drawable.dot_warn);
         }
         if (tvStatusText != null) {
-            tvStatusText.setText(ready ? "服务已就绪" : "正在加载模型…");
-            tvStatusText.setTextColor(ready ? C_TEXT : C_TEXT_SUB);
+            if (!enabled) {
+                tvStatusText.setText("服务已关闭");
+                tvStatusText.setTextColor(C_TEXT_SUB);
+            } else {
+                tvStatusText.setText(ready ? "服务已就绪" : "正在加载模型…");
+                tvStatusText.setTextColor(ready ? C_TEXT : C_TEXT_SUB);
+            }
+        }
+        if (tvStatusSub != null) {
+            // 关闭时不能继续显示接口地址：那个端口已经没人监听，
+            // 用户照着它去调只会拿到「连接被拒」，还以为是服务坏了。
+            tvStatusSub.setText(enabled ? LOCAL_URL : "接口未监听");
         }
         if (tvBatteryText != null) {
             boolean ok = isIgnoringBatteryOptimizations();
@@ -436,6 +509,278 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ============================================================
+    //  滑动触发页（入口）
+    // ============================================================
+    /**
+     * 「滑动触发」页：只做入口与状态展示，细节交给 {@link EdgeGestureActivity}。
+     *
+     * 放在主界面而不是藏进二级菜单，是因为这个功能需要「随手开随手关」：
+     * 手势引擎开着时会常驻一个悬浮窗，用户得能一眼看到它是否在运行。
+     */
+    private void buildGesturePage(ViewGroup parent) {
+        // ---------- 状态卡 ----------
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setElevation(dp(1));
+
+        TextView title = new TextView(this);
+        title.setText("边缘滑动手势");
+        title.setTextSize(15f);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setTextColor(C_TEXT);
+        card.addView(title);
+
+        tvGestureState = new TextView(this);
+        tvGestureState.setTextSize(12.5f);
+        tvGestureState.setTextColor(C_TEXT_SUB);
+        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        stLp.topMargin = dp(6);
+        card.addView(tvGestureState, stLp);
+
+        TextView desc = new TextView(this);
+        desc.setText("在屏幕边缘放一个可拖动的滑动手柄，手指从手柄上划过设定距离就"
+                + "立刻触发（滑过即响应，不必抬手）。支持上/下/左/右加四个斜向"
+                + "共 8 个方向，每个方向的触发距离都能单独调，也可以让整条边缘都可滑动。");
+        desc.setTextSize(12.5f);
+        desc.setTextColor(C_HINT);
+        desc.setLineSpacing(dp(3), 1f);
+        LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        descLp.topMargin = dp(10);
+        card.addView(desc, descLp);
+
+        parent.addView(card, cardLp());
+
+        // ---------- 两个入口按钮 ----------
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button btnOpen = secondaryButton("打开手势设置", v -> EdgeGestureActivity.open(this));
+        Button btnActive = secondaryButton("去启用", v -> {
+            // 没开总开关就直接开，已经开了就跳进设置页（用户大概是想调参数）
+            if (!EdgeGesturePrefs.isEnabled(this)) {
+                EdgeGesturePrefs.setEnabled(this, true);
+                EdgeGestureService.sync(this);
+                toast("已启用边缘滑动触发");
+                refreshGestureState();
+            } else {
+                EdgeGestureActivity.open(this);
+            }
+        });
+        LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        bLp.topMargin = dp(12);
+        bLp.rightMargin = dp(5);
+        row.addView(btnOpen, bLp);
+        LinearLayout.LayoutParams bLp2 = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        bLp2.topMargin = dp(12);
+        bLp2.leftMargin = dp(5);
+        row.addView(btnActive, bLp2);
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // ---------- 滑动菜单 ----------
+        // 菜单是「手势的产物」，跟手柄、触发距离是一回事，所以放在这一页；
+        // 早先挂在「手势设置」二级页里，得点进去才找得到。
+        buildMenuCard(parent);
+
+        // ---------- 和宏怎么配合 ----------
+        addSectionTitle(parent, "怎么让宏收到手势");
+        LinearLayout tip = new LinearLayout(this);
+        tip.setOrientation(LinearLayout.VERTICAL);
+        tip.setBackground(borderedBg(C_BRAND_SOFT, 0x00000000, 14));
+        tip.setPadding(dp(16), dp(14), dp(16), dp(14));
+        addTipLine(tip, "插件方式",
+                "MacroDroid → 触发器 → 「小孙OCR · 边缘滑动事件」，"
+                        + "选好方向即可；方向不符的宏不会被触发。"
+                        + "滑出菜单选中后，结果会以菜单变量的形式交给宏，\n"
+                        + "变量名叫什么由你在 MacroDroid 里自己定。");
+        parent.addView(tip, cardLp());
+
+        refreshGestureState();
+    }
+
+    /**
+     * 「滑动菜单」入口卡片。
+     *
+     * <p>菜单是「全局一套」的 —— 任何一个手柄滑过阈值都弹同一份菜单，
+     * 项序号也从同一套列表算起。所以它放在「滑动触发」页，和手柄、
+     * 触发距离并列，而不是塞进某个手柄的编辑页（那样会让人以为
+     * 每个手柄能各配一菜单）。
+     */
+    private void buildMenuCard(ViewGroup parent) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.setElevation(dp(1));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText("滑动菜单");
+        t.setTextSize(14.5f);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+        boolean on = EdgeGesturePrefs.isMenuEnabled(this);
+        int n = EdgeGesturePrefs.getMenuItems(this).size();
+        TextView sub = new TextView(this);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(C_HINT);
+        sub.setLineSpacing(0f, 1.35f);
+        if (!on) {
+            sub.setText("未启用 · 现在是「滑过距离立即触发」");
+        } else if (n == 0) {
+            sub.setText("已启用，但一项都没配 —— 先添加菜单项");
+        } else {
+            sub.setText("已启用 · " + n + " 项 · 滑出后不抬手就能选");
+        }
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sl.topMargin = dp(3);
+        col.addView(sub, sl);
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(20);
+        arrow.setTextColor(C_HINT);
+        arrow.setPadding(dp(8), 0, 0, 0);
+        row.addView(arrow);
+        row.setOnClickListener(v -> EdgeGestureMenuActivity.open(this));
+        card.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        parent.addView(card, cardLp());
+    }
+
+    /** 方块提示卡里的一行（标题 + 说明）。 */
+    private void addTipLine(ViewGroup parent, String head, String body) {
+        TextView h = new TextView(this);
+        h.setText(head);
+        h.setTextSize(12.5f);
+        h.setTypeface(null, Typeface.BOLD);
+        h.setTextColor(C_BRAND_DARK);
+        if (parent.getChildCount() > 0) {
+            h.setPadding(0, dp(10), 0, 0);
+        }
+        parent.addView(h);
+
+        TextView b = new TextView(this);
+        b.setText(body);
+        b.setTextSize(12f);
+        b.setTextColor(C_TEXT_SUB);
+        b.setLineSpacing(dp(3), 1f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(3);
+        parent.addView(b, lp);
+    }
+
+    /** 刷新「滑动触发」页的状态文案（没打开这一页时 tvGestureState 为 null，安全跳过）。 */
+    private void refreshGestureState() {
+        if (tvGestureState == null) {
+            return;
+        }
+        boolean on = EdgeGesturePrefs.isEnabled(this);
+        boolean overlay = android.provider.Settings.canDrawOverlays(this);
+        String s;
+        int color;
+        if (!on) {
+            s = "已关闭 · 手势引擎未运行";
+            color = C_TEXT_SUB;
+        } else if (!overlay) {
+            s = "已开启，但缺少「悬浮窗权限」，手柄无法显示";
+            color = C_WARN;
+        } else if (EdgeGesturePrefs.gsRunning) {
+            s = "运行中 · 当前 " + EdgeGesturePrefs.gsHandleCount + " 个手柄";
+            color = C_OK;
+        } else {
+            s = "已开启，服务正在启动…";
+            color = C_TEXT_SUB;
+            // 状态还没就绪，排一条自收敛的重试链，稍后自己刷新。
+            scheduleGestureRecheck(0);
+        }
+        tvGestureState.setText(s);
+        tvGestureState.setTextColor(color);
+        if (EdgeGesturePrefs.gsRunning) {
+            // 已经跑到「运行中」，就不必再重试了。
+            cancelGestureRecheck();
+        }
+    }
+
+    /**
+     * 排一条「稍后重新读一次手势状态」的延迟任务。
+     *
+     * 背景：gsRunning 是服务的静态标志，只有 onStartCommand 真正执行到那一行才为 true。
+     * 用户从最近任务里划掉应用时，Activity 会走 onResume → refreshGestureState，
+     * 而此刻服务往往还在重建途中，于是界面停在「服务正在启动…」。
+     * 这里让它在 6 秒内自己多读几次，服务一就绪界面就自动变成「运行中」。
+     *
+     * 写法上刻意把计数放在任务自己身上（不用成员变量）：
+     * 每条链各数各的，永远不会互相踩，也不必担心重复排队造成计数错乱。
+     *
+     * @param delays 已经延迟过几次
+     */
+    private void scheduleGestureRecheck(final int delays) {
+        if (tvGestureState == null) {
+            return;
+        }
+        // 已经排了一条链就别再排第二条（每条链都排在同一个 Handler 上，
+        // 靠这个标志保证同一时刻最多只有一条链在跑）。
+        if (gestureRecheckPending) {
+            return;
+        }
+        if (delays >= GESTURE_RECHECK_MAX) {
+            return;
+        }
+        gestureRecheckPending = true;
+        if (gestureRecheckHandler == null) {
+            gestureRecheckHandler = new android.os.Handler(getMainLooper());
+        }
+        gestureRecheckHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                gestureRecheckPending = false;
+                if (tvGestureState == null) {
+                    return;
+                }
+                if (EdgeGesturePrefs.gsRunning) {
+                    // 服务就绪了：复用它把文案与颜色一起改对。
+                    refreshGestureState();
+                    return;
+                }
+                if (!EdgeGesturePrefs.isEnabled(MainActivity.this)) {
+                    // 用户中途关了总开关，不必再等。
+                    refreshGestureState();
+                    return;
+                }
+                if (!android.provider.Settings.canDrawOverlays(MainActivity.this)) {
+                    // 缺悬浮窗权限，服务起不来，重试也不会变，交给 refreshGestureState 报状态。
+                    refreshGestureState();
+                    return;
+                }
+                // 还是没就绪，但说明服务确实在启动途中，我们主动再拉它一次，
+                // 避免它卡在「已请求但一直没走 onStartCommand」的状态。
+                EdgeGestureService.sync(MainActivity.this);
+                scheduleGestureRecheck(delays + 1);
+            }
+        }, GESTURE_RECHECK_INTERVAL);
+    }
+
+    /** 手势状态已确定时，取消还在排队的重试，省掉无谓的唤醒。 */
+    private void cancelGestureRecheck() {
+        gestureRecheckPending = false;
+        if (gestureRecheckHandler != null) {
+            gestureRecheckHandler.removeCallbacksAndMessages(null);
+        }
+    }
+
+    // ============================================================
     //  接口文档页
     // ============================================================
 
@@ -444,6 +789,8 @@ public class MainActivity extends AppCompatActivity {
         parent.addView(card, cardLp());
         tvStatusDot = (TextView) card.getChildAt(0);
         tvStatusText = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(0);
+        tvStatusSub = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(1);
+        addCard(parent, buildOcrSwitchCard());
 
         addCard(parent, buildParamCard());
 
@@ -488,6 +835,77 @@ public class MainActivity extends AppCompatActivity {
         addSectionTitle(parent, "命令行启动服务");
         addCodeCard(parent, "adb / shell",
                 "am start-foreground-service com.xiaosun.ocr/.OCRService");
+    }
+
+    /**
+     * 「启用 OCR 服务」开关卡片。
+     *
+     * 【为什么单独做成一张卡而不是塞进状态卡】
+     * 状态卡说的是「现在是什么情况」，这张卡说的是「要不要开」。
+     * 混在一起点击区域会跟状态文字打架（用户点状态也会误触开关）。
+     *
+     * 【关掉之后影响什么】
+     * 只影响 HTTP 接口这条链路：接口不再监听、模型不再常驻、开机不再自启。
+     * 边缘滑动手势是另一个服务，不受影响 —— 这正是本开关要服务的人群：
+     * 只想用手势触发宏、不想养着一个 OCR 服务的人。
+     */
+    private View buildOcrSwitchCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.setElevation(dp(1));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText("启用 OCR 服务");
+        t.setTextSize(14.5f);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+        TextView sub = new TextView(this);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(C_TEXT_SUB);
+        sub.setLineSpacing(dp(3), 1f);
+        sub.setText("关闭后接口不再监听，也不开机自启；\n"
+                + "「边缘滑动手势」是另一个服务，不受影响。");
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sl.topMargin = dp(4);
+        col.addView(sub, sl);
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        android.widget.Switch sw = new android.widget.Switch(this);
+        sw.setChecked(OCRService.isEnabled(this));
+        sw.setOnCheckedChangeListener((b, checked) -> {
+            OCRService.setEnabled(this, checked);
+            if (checked) {
+                // 【为什么要清掉 serviceStarting】
+                // ensureServiceRunning() 见到 serviceStarting=true 会直接返回，
+                // 那个标志是上一次启动的 4 秒保护窗口、只在 postDelayed 里复位。
+                // 若用户正好在这个窗口内「先关后开」，这次打开就会被短路掉，
+                // 而 4 秒后没有任何代码会替他重试 —— 界面会永远停在
+                // 「正在加载模型…」，看着就像开关坏了。
+                // 这里清掉是安全的：重复 startForegroundService 本身幂等。
+                serviceStarting = false;
+                // 开启：立刻拉起来，不用等下次进 App。
+                ensureServiceRunning();
+            }
+            // 关闭时 setEnabled 已经 stopService 了，这里不用再管。
+            // 稍等一下再刷新：服务的 isRunning 是在 onDestroy 里翻的，
+            // 立刻刷新会短暂显示成「正在加载模型…」，看着像没关掉。
+            new android.os.Handler(getMainLooper()).postDelayed(this::refreshStatus, 600);
+            toast(checked ? "已启用 OCR 服务" : "已关闭 OCR 服务");
+        });
+        row.addView(sw);
+        card.addView(row);
+        return card;
     }
 
     private View buildParamCard() {
@@ -980,6 +1398,10 @@ public class MainActivity extends AppCompatActivity {
 
     /** 截屏后直接走本地接口识别。 */
     private void captureAndOcr() {
+        // 开关没开时截屏识别同样走不通（服务不在，HTTP 直接失败）。
+        if (!warnIfOcrDisabled()) {
+            return;
+        }
         // 先按服务的真实状态判断（root 可用时 captureReady 可能还没同步过来）
         boolean readyNow = OCRService.screenCaptureReady;
         if (!readyNow && !captureReady) {
@@ -1307,6 +1729,11 @@ public class MainActivity extends AppCompatActivity {
         final String p = etPath == null ? "" : etPath.getText().toString().trim();
         final int type = formatSpinner == null ? 1 : formatSpinner.getSelectedItemPosition() + 1;
 
+        // 开关关着就别往下走了：ensureServiceRunning() 此时会直接返回，
+        // 后面的 HTTP 请求只会拿到「连接失败」，用户完全不知道是开关没开。
+        if (!warnIfOcrDisabled()) {
+            return;
+        }
         if (p.length() == 0) {
             toast("请输入图片路径或选择图片");
             return;

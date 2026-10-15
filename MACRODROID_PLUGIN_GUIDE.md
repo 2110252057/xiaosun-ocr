@@ -469,6 +469,41 @@ for (String key : vars.keySet()) {
 
 ### 6.1 变量传不回来
 
+**先分清两条完全独立的链路**，它们的变量回传方式不一样：
+
+| | 触发方式 | 变量从哪回传 |
+|---|---|---|
+| **动作**（Setting） | 宿主发 `FIRE_SETTING` 有序广播 | `PluginFireReceiver` 里 `getResultExtras(true).putBundle(VARIABLES, vars)` |
+| **事件触发器**（Event） | 插件主动广播 `REQUEST_QUERY` → 宿主回问 `QUERY_CONDITION` | **`PluginConditionReceiver` 自己回**，宿主不会经过 `FIRE_SETTING` |
+
+⚠️ **本项目踩过的坑**：`PluginConditionReceiver` 原先只调 `setResultCode(16/17/18)`，
+一个变量都没回。结果就是「动作能拿到变量，事件触发器里变量全是空的」——
+宏确实被触发了，但 `%xsocr_gs_direction` 之类全是空值。
+
+**事件链路的正确写法**（参照 AutoInput，`com.joaomgcd.autoinput`）：
+
+```java
+// 在 QUERY_CONDITION 的应答里：
+Bundle out = getResultExtras(true);            // ★ 必须 true，拿的是宿主那份实例
+if (out != null) {
+    out.putBundle("net.dinglisch.android.tasker.extras.VARIABLES", vars);
+}
+setResultCode(code);
+```
+
+`getResultExtras(true)` 的 `true` 不能省：它返回宿主那一侧的**同一个 Bundle 实例**，
+往里 put 才能被宿主读到；自己 `new Bundle()` 写了也传不回去。
+
+**变量键只有一个**：`net.dinglisch.android.tasker.extras.VARIABLES`。
+别想着「多写几个候选键保险」——同名多写只是覆盖，异名宿主不认，纯属自欺。
+
+**要不要条件成立才回变量？** AutoInput 的做法是：
+只有条件成立（返回 16）时才 `setVars()`。理由很实在——
+宏只在条件成立时才真正往下跑，不成立时它本来就不会去读变量。
+但本项目实现为**消息真实就回**（含 17），多给一点无害；
+唯独**防伪校验失败（18）时坚决不回**，因为那不是一次真实手势，
+回变量会让宏拿到上一次的陈旧值。
+
 按顺序检查：
 
 | 检查项 | 方法 |
@@ -478,6 +513,7 @@ for (String key : vars.keySet()) {
 | ③ 是否做了变量映射 | MacroDroid 动作里「Output variables」 |
 | ④ 是否超时 | 日志看耗时是否 > 11000ms |
 | ⑤ 是否收到 `PENDING` | 宿主看到 PENDING 才不按超时处理 |
+| ⑥ **事件触发器**：应答里有没有回变量 | 见上面的坑，条件接收器极易漏写 |
 
 ### 6.2 日志里出现「非有序广播」
 
@@ -519,7 +555,6 @@ PendingResult pending = goAsync();
 以下是本项目（小孙OCR）的实际实现，可直接参考。
 
 ### 7.1 变量定义
-
 ```java
 public static final String VAR_TEXT  = "%xsocr_text";
 public static final String VAR_MATCH = "%xsocr_match";
@@ -528,10 +563,15 @@ public static final String VAR_Y     = "%xsocr_y";   // 整数
 public static final String VAR_ERROR = "%xsocr_error";
 public static final String VAR_TIME  = "%xsocr_time";
 public static final String VAR_TIER  = "%xsocr_tier";
+// 边缘滑动手势（见 7.4）
+public static final String VAR_GS_DIRECTION     = "%xsocr_gs_direction";
+public static final String VAR_GS_DIRECTION_CN  = "%xsocr_gs_direction_cn";
+public static final String VAR_GS_HANDLE        = "%xsocr_gs_handle";
+public static final String VAR_GS_EVENT         = "%xsocr_gs_event";
+public static final String VAR_GS_SEQ           = "%xsocr_gs_seq";
+public static final String VAR_GS_TIME          = "%xsocr_gs_time";
 ```
-
 ### 7.2 声明（三段式）
-
 ```java
 public static final String[] ALL_VARIABLES = {
     VAR_TEXT  + "\n识别文本\n识别出的全部文字（多行用换行连接）",
@@ -541,6 +581,12 @@ public static final String[] ALL_VARIABLES = {
     VAR_ERROR + "\n错误信息\n失败时才有内容",
     VAR_TIME  + "\n耗时(ms)\n本次识别耗时",
     VAR_TIER  + "\n模型档位\ntiny / small / rapid",
+    VAR_GS_DIRECTION    + "\n手势方向\n边缘滑动方向：left / right / up / down 等",
+    VAR_GS_DIRECTION_CN + "\n手势方向(中文)\n向左 / 向右 / 向上 等",
+    VAR_GS_HANDLE       + "\n触发手柄\n发起手势的滑动手柄名称",
+    VAR_GS_EVENT        + "\n手势事件\ntrigger / start / cancel",
+    VAR_GS_SEQ          + "\n手势序号\n每触发一次加 1，可用于去重",
+    VAR_GS_TIME         + "\n手势时间\n手势触发的毫秒时间戳",
 };
 ```
 
@@ -556,9 +602,300 @@ vars.putString(VAR_ERROR, "");
 vars.putString(VAR_TIME, String.valueOf(cost));
 vars.putString(VAR_TIER, tier);
 ```
-
 > ⚠️ **读取时不能用 `getString()`**——对 Integer 会抛 `ClassCastException`。
 > 遍历保存时用 `String.valueOf(bundle.get(key))`。
+
+### 7.4 把「边缘滑动手势」接进插件
+
+手势由 `EdgeGestureService`（悬浮窗）产生。它**不对外发独立广播**，
+只做两件事：① 按事件插件协议向宿主发一条 `REQUEST_QUERY`（见 7.5）；
+② 在进程内写下一组 volatile 静态字段，供插件路径零 IPC 取用：
+
+```
+（历史上曾发过 action = com.xiaosun.ocr.action.EDGE_GESTURE 的隐式广播，
+  携带 direction / handle / event / seq，现已整体撤除，见下方说明。）
+```
+
+同一条事件在进程内还会写进 `EdgeGesturePrefs` 的一组 volatile 静态字段
+（`gsLastDirection` / `gsLastHandle` / `gsSeq` …），因此插件路径可以零 IPC 取到它：
+
+```java
+private void stashGestureVars(Bundle vars) {
+    vars.putString(VAR_GS_DIRECTION,    EdgeGesturePrefs.gsLastDirection);
+    vars.putString(VAR_GS_DIRECTION_CN, EdgeGesturePrefs.gsLastDirectionLabel);
+    vars.putString(VAR_GS_HANDLE,       EdgeGesturePrefs.gsLastHandle);
+    vars.putString(VAR_GS_EVENT,        EdgeGesturePrefs.gsLastEvent);
+    vars.putString(VAR_GS_SEQ,          String.valueOf(EdgeGesturePrefs.gsSeq));
+    vars.putString(VAR_GS_TIME,         String.valueOf(EdgeGesturePrefs.gsLastAt));
+}
+```
+
+调用点在 `PluginFireReceiver.doWork()` 开头 —— **必须在耗时的 OCR 之前取快照**，
+否则识别过程中用户又滑了一次，回传的就会串成后一次的手势。
+
+于是宏只有一条可用路径：
+
+| 路径 | 配置方式 | 拿得到什么 |
+|---|---|---|
+| 插件（唯一） | 触发器 → 「小孙OCR · 边缘滑动事件」 | 识别结果 **+** 本次手势变量 |
+
+判断「这次到底是不是滑动触发的」：对比 `%xsocr_gs_seq` 有没有变化即可。
+
+> 曾经的「广播」旁路（`com.xiaosun.ocr.action.EDGE_GESTURE`）已撤除：
+> 它每次滑动都往系统里扔一条人人可收的隐式广播，既多一次跨进程唤醒，
+> 又不带任何防伪信息 —— 谁都能照着抄一条来骗过监听方的宏。
+> 插件通道能直接回传变量，已覆盖全部用法。
+> 手势上下文的对外传递现在只走 `stashGestureVars()` 这一条路。
+
+### 7.5 ★ 让插件出现在「触发器」列表里（事件协议）
+
+**这是最容易踩的坑：宿主的「动作」和「触发器」是两份列表、两套协议。**
+
+| 列表 | 发现插件靠的 action | 谁响应 |
+|---|---|---|
+| 动作（Action） | `com.twofortyfouram.locale.intent.action.EDIT_SETTING` | Activity |
+| 触发器 → 事件 | `net.dinglisch.android.tasker.ACTION_EDIT_EVENT` | Activity（或 alias） |
+
+只声明 `EDIT_SETTING` 时，插件在动作列表里正常，**在触发器列表里彻底看不到** ——
+不是配置错了，是根本没注册那条 intent-filter。
+
+> ★ 早期还实现过**条件身份**（`EDIT_CONDITION`），现已撤除。
+> 条件与事件的配置界面、功能完全一样，唯一差别是事件携带防伪数据
+> （随机 message id + 60 秒有效期），条件只能读进程内的
+> 「最近一次手势」快照、理论上可被伪造广播骗过。
+> 两个入口并列只会让人在触发器列表里挑错，还可能两个都配
+> 导致同一次滑动触发两遍，所以只留事件。
+> （`PluginContract.MODE_STATE` 与 `PluginConditionReceiver.answerState()`
+>  字段保留了，仅为不打断升级前配好的老宏。）
+
+#### ① 清单声明（两种身份，一份界面）
+
+```xml
+<!-- 配置界面本体：不挂任何 intent-filter，只作为别名目标 -->
+<activity android:name=".PluginEditActivity" android:exported="true"
+          android:theme="@style/PluginDialogTheme" />
+
+<!-- 动作身份：识别屏幕文字 -->
+<activity-alias android:name=".OcrActionConfigActivity" android:exported="true"
+                android:label="@string/app_name"
+                android:targetActivity=".PluginEditActivity">
+    <intent-filter>
+        <action android:name="com.twofortyfouram.locale.intent.action.EDIT_SETTING" />
+        <category android:name="android.intent.category.DEFAULT" />
+    </intent-filter>
+</activity-alias>
+
+<!-- 事件身份：手势触发器，必须用 alias（原版遵此） -->
+<activity-alias android:name=".TaskerEventConfigActivity" android:exported="true"
+                android:label="@string/tasker_event_name"
+                android:targetActivity=".PluginEditActivity">
+    <intent-filter>
+        <action android:name="net.dinglisch.android.tasker.ACTION_EDIT_EVENT" />
+        <category android:name="android.intent.category.DEFAULT" />
+    </intent-filter>
+</activity-alias>
+
+<!-- 查询应答者。★ 名字有误导性：它不只是给"条件"用的 -->
+<receiver android:name=".PluginConditionReceiver" android:exported="true">
+    <intent-filter>
+        <action android:name="com.twofortyfouram.locale.intent.action.QUERY_CONDITION" />
+    </intent-filter>
+</receiver>
+```
+
+用 `activity-alias` 的价值只在**名字**：alias 的 `android:label` 决定它在
+对应列表里显示什么。两个身份共用同一个 Activity 类，代码零重复，
+界面靠 `getIntent().getAction()` 区分该显示哪套控件（见 `PluginEditActivity` 的 `applyMode()`）。
+
+#### ② 事件是「插件主动喊」，不是宿主来问
+
+```java
+// 手势发生的那一刻（EdgeGestureService.fire()）
+Intent i = new Intent("com.twofortyfouram.locale.intent.action.REQUEST_QUERY");
+i.putExtra("com.twofortyfouram.locale.intent.extra.ACTIVITY",
+        getPackageName() + ".TaskerEventConfigActivity");
+TaskerEventProtocol.addEventData(i, dirKey);   // 附防伪数据
+sendBroadcast(i);                              // ★ 不能 setPackage，宿主是第三方
+```
+
+`EXTRA_ACTIVITY` 指明「是哪个组件的实例出事了」，宿主据此把查询路由到对应宏。
+已经撤掉条件身份之后，插件只剩事件这一种触发器身份，所以每次手势
+**只发这一条 `REQUEST_QUERY`**，不存在「两条」的说法。
+
+宿主收到后会回头给 `PluginConditionReceiver` 发 `QUERY_CONDITION`，
+插件用 `setResultCode()` 回答：
+
+| 结果码 | 常量 | 含义 |
+|---|---|---|
+| 16 | `RESULT_CONDITION_SATISFIED` | 成立 → 宏跑 |
+| 17 | `RESULT_CONDITION_UNSATISFIED` | 不成立 → 宏不跑 |
+| 18 | `RESULT_CONDITION_UNKNOWN` | 说不清 → 宿主安静跳过 |
+
+**★ 别只回结果码，变量要一起回**（本项目踩过的大坑）：
+
+事件触发器**不经过** `FIRE_SETTING`，所以 `PluginFireReceiver` 里那套
+变量回传**在这条链路上根本不会执行**。宏确实会被触发，但里面
+`%xsocr_gs_direction`、`%xsocr_menu_index` 全是空的。
+
+必须在应答时自己把变量送回宿主（详见 6.1 与 `PluginConditionReceiver.answer()`）：
+
+```java
+Bundle out = getResultExtras(true);        // ★ true：拿宿主那份实例，不是新 Bundle
+out.putBundle("net.dinglisch.android.tasker.extras.VARIABLES", vars);
+setResultCode(16);
+```
+
+补充说明宿主塞进来的 `ResultReceiver`
+（键 `net.dinglisch.android.tasker.EXTRA_RESULT_RECEIVER`，AutoInput 用的就是它）：
+若存在，`receiver.send(结果码, 变量Bundle)` 是另一条独立通道。
+本实现两条都写，哪条宿主没在用它会自己忽略。
+
+⚠️ **只写一处必然漏**：判定逻辑散在各分支里、每处都手写一遍 `setResultCode` +
+`putBundle`，早晚有分支忘了回变量。本项目改成「分支只返回结果码 + 填变量 Bundle，
+发送统一走一个出口方法」——这次的 bug 就是这么防住的。
+
+#### ③ 防伪：`REQUEST_QUERY` 谁都能发
+
+隐式广播没有防护，任何 App 抄一条就能凭空触发用户的宏（而宏里往往是
+「点击屏幕」「发短信」）。解法是给每次上报签一个随机号：
+
+```java
+// 上报方
+int id = RANDOM.nextInt(Integer.MAX_VALUE);
+RECENT_MESSAGES.put(id, SystemClock.elapsedRealtime());
+data.putInt("net.dinglisch.android.tasker.MESSAGE_ID", id);
+intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
+
+// 应答方：宿主把 Bundle 原样递回来，核对
+//   ① id 在表里（是我们签的）  ② 距签发 ≤ 60 秒（不是重放）
+// 任一不满足 → 回 18（不是 17，18 才会被安静忽略）
+```
+
+要点：
+- 时间基准用 `SystemClock.elapsedRealtime()`，**不要用 `currentTimeMillis()`**——
+  系统时间被 NTP 校正或用户手改时，60 秒有效期会算错
+- 表用 `LinkedHashMap<Integer,Long>`，超 100 条时从迭代器首个（最旧）开始删
+- 校验失败回 **18** 而非 17：17 会被宿主当成「条件确实不成立」可能引发副作用，
+  18 才是「无可奉告」
+
+配置里留了「校验收到的消息」复选框，给那些不把 `PASS_THROUGH_DATA`
+递回来的宿主留退路（各版本行为不一），关掉则退化为「最近一次手势」判断。
+
+#### ④ 排查：触发器列表里看不到插件
+
+| 现象 | 原因 |
+|---|---|
+| 动作列表有、触发器列表没有 | 缺 `ACTION_EDIT_EVENT` 的 intent-filter（挂在 alias 上） |
+| 列表里名字很怪或没名字 | Activity（或 alias）没设 `android:label` |
+| 能配好但手势时宏不跑 | 没发 `REQUEST_QUERY`；或发了但应答器（`PluginConditionReceiver`）没注册 |
+| 宏偶尔莫名触发 | 没做防伪校验，别的 App 伪造了 `REQUEST_QUERY` |
+| 配完改了代码不生效 | 宿主缓存了配置，**必须重新保存一次插件动作** |
+
+### 7.6 ★ 跟手滑出菜单（不抬手选完）
+
+#### 想要的效果
+
+手指按住边缘手柄、朝有效方向滑，滑过触发距离后**不抬手**，
+直接弹出一排按钮；继续滑到某个按钮上（跟手高亮），抬手就选中它。
+
+#### 为什么宏弹不了这块菜单
+
+普通做法走不通，卡在 Android 输入分发的一条硬规则上：
+
+> `InputDispatcher` 在手指按下（`ACTION_DOWN`）那一刻做一次命中判定，
+> 把**整条触摸序列**绑定给当时那个窗口。此后 MOVE / UP 只投递给它。
+> 中途新建的窗口收不到 MOVE（无法跟手高亮），也收不到 UP（无法判定选中）。
+
+官方**没有任何 API** 能把进行中的触摸序列转交给别的窗口或进程。
+
+更致命的是：宏的 Java 动作是**一次性脚本**，跑完即退，
+根本没法常驻持有窗口。所以「宏自己弹菜单」这条路彻底走不通。
+
+#### 分工
+
+于是菜单由**已经拿住那次触摸的那个悬浮窗**自己弹，也就是本应用的
+`EdgeGestureService`：
+
+| | 负责什么 |
+|---|---|
+| 本应用 | 配菜单（设置页）、弹菜单、跟手高亮、抬手判定，把选中项写成变量 |
+| 宏 | 被触发后读变量，分支执行动作 |
+
+关键在于**宏被唤起的时刻，正是手指抬起的时刻**。
+所以宏侧既不需要常驻，也不需要处理「手指还按着」的中间态 ——
+它只是在「发生了」之后按结果做事。
+
+#### 配置（全在本应用里，宏不用管）
+
+设置 → 边缘滑动触发 → **滑动菜单**：
+
+- **启用开关**：关 = 滑过距离立即触发宏（老行为）；开 = 弹出菜单。
+- **图标大小 / 显示文字 / 布局**（底部横排、环形）。
+- **菜单项列表**：添加、改名、选图标、调顺序、删除。
+
+每一项有三个字段：
+
+| 字段 | 说明 |
+|---|---|
+| 名字 | 显示在菜单按钮上的文字，必填 |
+| 动作值 | 回传给宏的 `%xsocr_menu_action`；留空就和名字一样 |
+| 图标 | `app:包名` / `file:路径` / 资源名，留空用名字首字顶着 |
+
+**动作值为什么要单独一栏**：名字是给人看的、动作值是给宏比的。
+两者分开之后，按钮可以叫「微信」而动作值叫 `wechat`，
+宏里的判断条件比按序号好读得多。
+
+`app:包名` 是最省事的写法，比如：
+
+```
+名字=截图   动作值=shot    图标=app:com.miui.screenshot
+名字=OCR    动作值=ocr     图标=app:com.xiaosun.ocr
+名字=翻译   动作值=trans   图标=（留空，显示「翻」）
+```
+
+> 注：本应用 `targetSdk 34`，受包可见性（package visibility）限制，
+> 界面里**没有**「从已装应用里挑一个」的列表 —— 那需要声明
+> `QUERY_ALL_PACKAGES`，只为取个图标不值当。
+> 直接填包名即可，编辑框旁边有实时预览，打错一个字母立刻能看出来。
+
+#### 回传的变量
+
+| 变量 | 含义 |
+|---|---|
+| `%xsocr_menu_index` | 选中项序号（从 0 开始）；**-1 = 取消或没启用菜单** |
+| `%xsocr_menu_text` | 选中项的名字 |
+| `%xsocr_menu_action` | 选中项的动作值 |
+
+宏里这样分支：
+
+```
+如果 %xsocr_menu_index = -1    → 什么都不做（滑到空白处松手了）
+如果 %xsocr_menu_action = shot → 截图
+如果 %xsocr_menu_action = ocr  → OCR 识别
+```
+
+⚠ 一个细节：`index` 是用 `putInt` 放进变量 Bundle 的（和 `%xsocr_x` 一致，
+类型更规范）。宿主最终仍会把它转成文本，所以宏里按字符串比较即可；
+但**读取方别再调 `getString()`**，会抛 `ClassCastException`。
+
+#### 实现要点（改插件时别踩）
+
+- **窗口只能「原地长大」**：`wm.updateViewLayout()` 只改 `width/height/gravity`，
+  窗口 token 与 input channel 不变，触摸不中断。
+  ❌ **绝不能用 `removeView()` + `addView()`** —— 当前手势会立刻收到 `ACTION_CANCEL`。
+- **多指要过滤**：菜单展开后窗口是全屏的，第二根手指按下来也落进本窗口。
+  必须只认 `ACTION_DOWN` 那一刻握住的那根手指（`activePointerId`），
+  否则高亮会跟着别的手指乱跳，甚至被别的手指的 `UP` 提前结束菜单。
+- **抬手后必须缩回**：还原 `width/height/gravity/x/y`，否则手柄再也不出现。
+- **`ACTION_CANCEL` 不能当成选中**：那是系统中断（来电、窗口被顶掉）。
+  收到它只记一次「取消」并收回窗口，**不触发宏**。
+- **展开期间不再申请手势排除区**：整屏已经归本窗口，此时正是最不该
+  干扰系统手势判定的时刻（用户可能只是想点按钮）。收起后重新报。
+- **自绘而不是 `addView()`**：`GestureView` 是 `View` 不是 `ViewGroup`；
+  而且自绘没有布局延迟 —— 跟手判定必须零延迟。
+- **命中框比圆大**：命中框要抱住图标下方的文字（落在文字上也算选中），
+  但要按图标直径画**真正的圆**，别拿命中框画圆角矩形，
+  否则会变成胶囊状，看着像进度条。
 
 ---
 
@@ -566,8 +903,14 @@ vars.putString(VAR_TIER, tier);
 
 | 事项 | 结论 |
 |---|---|
-| 发现插件 | 声明 `EDIT_SETTING` + `FIRE_SETTING` 两个组件 |
-| 插件显示名 | Activity 的 `android:label` |
+| 发现插件（动作） | 声明 `EDIT_SETTING` + `FIRE_SETTING` 两个组件 |
+| **发现插件（触发器）** | **声明 `ACTION_EDIT_EVENT` 到 alias 上**（条件身份已撤除） |
+| 触发器应答 | `QUERY_CONDITION` 接收器，`setResultCode(16/17/18)` |
+| **触发器变量回传** | **应答里自己 `getResultExtras(true).putBundle(VARIABLES, vars)`；`FIRE_SETTING` 那套在事件链路上不执行** |
+| 触发上报 | 插件主动发 `REQUEST_QUERY` + `EXTRA_ACTIVITY`，**不能 setPackage** |
+| 事件防伪 | 随机 `MESSAGE_ID` + 60 秒有效期（用 `elapsedRealtime`） |
+| 两个身份共用界面 | `activity-alias` 换 `label`，看 `getIntent().getAction()` 分支 |
+| 插件显示名 | Activity（或 alias）的 `android:label` |
 | 触发方式 | **有序广播**（`sendOrderedBroadcast`） |
 | 同步回传 | `setResultExtras(VARIABLES)`，**限 11 秒** |
 | **异步回传** | **`setResultCode(3)` + `signalFinish()`，无限制** |
@@ -577,6 +920,10 @@ vars.putString(VAR_TIER, tier);
 | 改代码后 | **必须重新配置插件动作** |
 | 变量值类型 | 最终统一转成字符串，但 `putInt` 更规范 |
 | 后台限制 | 广播后 10 秒豁免窗口；悬浮窗权限可解除 |
+| 手势取快照 | 在 `doWork()` 开头取，别放在耗时 OCR 之后 |
+| **菜单在哪配** | 本应用设置页（`EdgeGestureMenuActivity`），宏不参与 |
+| **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_action`，**-1 = 取消** |
+| **跟手菜单前提** | 菜单必须由拿住触摸的那个窗口弹，宏弹不了 |
 
 ---
 

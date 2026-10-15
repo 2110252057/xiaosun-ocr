@@ -114,6 +114,22 @@ public class PluginFireReceiver extends BroadcastReceiver {
         }
         if (cfg == null) cfg = new Bundle();
 
+        // ---------- 防御：别拿「触发器」的配置当「动作」跑 ----------
+        //
+        // 配置界面按 action 分两种模式，保存进 cfg 的 plugin_mode 就是标记：
+        //   setting → 识别屏幕文字（本接收器该干的活）
+        //   event   → 等某个手势（由 PluginConditionReceiver 应答）
+        //
+        // 理想情况下宿主不会把触发器配置发到 FIRE_SETTING 来，
+        // 但宿主版本众多、内部缓存也可能串；真发生了就是一次完整的
+        // 截屏 + OCR 白跑，白耗电还占着前台服务。
+        // 这里拦一道：不是动作配置就当没收到。
+        String cfgMode = cfg.getString(PluginContract.KEY_PLUGIN_MODE, null);
+        if (cfgMode != null && !PluginContract.MODE_SETTING.equals(cfgMode)) {
+            Log.w(TAG, "收到的是「" + cfgMode + "」配置，不是动作配置，跳过识别");
+            return;
+        }
+
         final Bundle config = cfg;
         final boolean ordered = isOrderedBroadcast();
 
@@ -261,6 +277,17 @@ public class PluginFireReceiver extends BroadcastReceiver {
         }, "xsocr-plugin-sync").start();
     }
 
+    /**
+     * 把「最近一次边缘手势」写进回传变量。
+     *
+     * 数据源是 {@link EdgeGesturePrefs} 里的一组 volatile 静态字段，
+     * 由 {@link EdgeGestureService} 在 fire() 的那一刻写入 —— 之所以不走
+     * Intent/Bundle 传递，是因为手势服务与插件可能不在同一进程状态、
+     * 且静态字段读取零成本、也不受广播异步时序影响。
+     *
+     * 值可能为空（用户从没滑过，或手势引擎没开），此时写空串而不是跳过：
+     * 让宿主侧变量有确定的值，宏里做判断时不会因为变量不存在而报错。
+     */
     /** 真正的干活逻辑。 */
     private void doWork(Context ctx, Bundle config, Bundle vars, boolean hasCompletion) {
         long t0 = System.currentTimeMillis();
@@ -302,8 +329,18 @@ public class PluginFireReceiver extends BroadcastReceiver {
         String tier = config.getString(PluginContract.KEY_TIER, null);
         int type = config.getInt(PluginContract.KEY_TYPE, 1);
         boolean joinNewline = config.getBoolean(PluginContract.KEY_JOIN_NEWLINE, true);
+vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
 
-        vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
+        // 全部走 vars 统一出口。
+        // ---------- 0. 不再带「边缘手势」上下文 ----------
+        // 本插件的动作就是「识别」：给图 / 截屏 → 回传识别结果。
+        // 边缘滑动那套（方向、序号、菜单选中项）是**触发器**那边的事：
+        //   · 方向在触发器配置时就比过了，不匹配的宏根本不会跑；
+        //   · 菜单选中项只在「滑出菜单」的场景里才有意义，
+        //     跟「宏主动调一次 OCR」没有关系。
+        // 所以动作路径一个手势变量都不回 —— 预告列表（ALL_VARIABLES）
+        // 里也没有它们，两边保持一致。
+
 
         // ---------- 1. 确保服务在跑 ----------
         // 服务承载 HTTP 接口和 native 识别能力，必须先就绪。
@@ -401,10 +438,10 @@ public class PluginFireReceiver extends BroadcastReceiver {
             // source=screenshot 时不传 path，服务端会自动截屏
             //
             // ★ 注意：这里**固定用 type=2**（含坐标）请求。
-            //   原因：坐标变量 %xsocr_x/%xsocr_y 需要引擎返回 x/y 字段，
+            //   原因：坐标变量（x/y）需要引擎返回 x/y 字段，
             //   而 type=1 的响应里根本没有坐标。如果跟着用户选的
             //   「纯文本」走，坐标就永远是 -1。
-            //   "纯文本 vs 含坐标" 只影响 %xsocr_text 的拼接样式，
+            //   "纯文本 vs 含坐标" 只影响识别文本的拼接样式，
             //   原始请求统一用 type=2，保证坐标始终可用。
             body.put("type", type >= 2 ? type : 2);
             if (tier != null && !tier.isEmpty()) body.put("tier", tier);

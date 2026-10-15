@@ -1,3 +1,12 @@
 <resources>
     <string name="app_name">小孙OCR</string>
+    <!--
+      MacroDroid / Tasker 的「触发器」列表里显示的名字。
+      用户在宏里加触发器时看到的就是这个，所以要写清楚
+      「这是干什么的」，而不是笼统的"小孙OCR"。
+
+      只保留「事件」一个入口：条件身份（EDIT_CONDITION）已撤除，
+      原因见 AndroidManifest.xml 里插件组件那一段注释。
+    -->
+    <string name="tasker_event_name">小孙OCR · 边缘滑动事件</string>
 </resources>

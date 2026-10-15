@@ -358,9 +358,59 @@ public class OCRService extends Service {
         }
         return true;
     }
-
-    private static final String PREFS = "xsocr_prefs";
+private static final String PREFS = "xsocr_prefs";
     private static final String KEY_TIER = "model_tier";
+    /** 「启用 OCR 服务」开关。默认 true —— 老用户升级后行为不变。 */
+    private static final String KEY_ENABLED = "ocr_enabled";
+
+    // ===================== 总开关 =====================
+    //
+    // 【为什么要有这个开关】
+    // 本应用有两套互不相干的能力：
+    //   ① HTTP OCR 接口（常驻前台服务 + 通知 + 模型常驻内存）
+    //   ② 边缘滑动触发（悬浮窗手柄 → 广播给 MacroDroid）
+    // 只想用②的人（比如「滑一下就让宏干别的事」）不该被迫扛着①：
+    // 一个前台通知、几百 MB 模型内存、以及开机自启。
+    // 关掉之后②照常工作，只是手势触发时不再顺带预热 OCR。
+    //
+    // 【关掉时正在跑的服务怎么办】
+    // 直接 stopService()，不给它「自己重启」的机会。
+    // 服务是 START_STICKY，但 stopService 是明确的停止意图，
+    // 系统不会把它再拉起来 —— 否则开关就成了摆设。
+    //
+    // 【默认值为什么是 true】
+    // 这个开关是后加的。老用户升级后 SharedPreferences 里没有这个键，
+    // 若默认 false 会让他们的接口一夜之间全挂 —— 必须默认 true。
+    /** OCR 服务当前是否启用。 */
+    public static boolean isEnabled(Context c) {
+        return c.getApplicationContext()
+                .getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_ENABLED, true);
+    }
+
+    /**
+     * 设置总开关。
+     *
+     * 只负责改值 + 停服务；「要不要重新拉起来」由调用方决定
+     * （界面用 startService，开机自启用 startForegroundService），
+     * 免得这里多一份启动逻辑、和各调用方各写各的。
+     */
+    public static void setEnabled(Context c, boolean on) {
+        c.getApplicationContext()
+                .getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putBoolean(KEY_ENABLED, on).apply();
+        if (!on) stop(c);
+    }
+
+    /** 主动停止服务（关闭开关时用）。 */
+    public static void stop(Context c) {
+        try {
+            c.getApplicationContext().stopService(new Intent(c, OCRService.class));
+        } catch (Throwable t) {
+            Log.w(TAG, "停止 OCR 服务失败: " + t);
+        }
+    }
+
 
     // ===================== 统一识别入口 =====================
 
@@ -566,6 +616,19 @@ public class OCRService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        // 【总开关拦截·第一道】必须在**这一行的后面之前**做完：
+        // onCreate 一旦继续往下走，就会 startForegroundCompat()（弹通知）、
+        // startHttpServer()（监听端口）、以及后台线程加载模型 ——
+        // 那时即便 onStartCommand 里再 stopSelf，通知和几百 MB 模型
+        // 也已经白白付出了一次代价。
+        //
+        // 所以开关关闭时这里**原地返回**：不弹通知、不开端口、不加载模型。
+        // onStartCommand 里还有第二道拦截负责收尾（stopSelf + 不粘性）。
+        if (!isEnabled(this)) {
+            Log.i(TAG, "OCR 服务已关闭（用户设置），onCreate 不做任何初始化");
+            stopSelf();
+            return;
+        }
         Log.i(TAG, "Service Creating...");
         isRunning = true;
         startForegroundCompat();
@@ -711,6 +774,20 @@ public class OCRService extends Service {
         // 必须在 startForegroundCompat() 之前判断，否则会先弹出一个通知。
         if (!isCallerAllowed()) {
             Log.w(TAG, "拒绝未授权调用者的启动请求（uid 校验未通过）");
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        // 【总开关拦截】这是唯一一个所有启动路径都必经的关口：
+        //   界面、开机自启、插件（宏里的 OCR 动作）、手势预热 ——
+        //   全都最终落到 onStartCommand。
+        // 在这里统一拦一次，比在每个调用方各写一遍可靠得多
+        // （调用方漏一个，开关就形同虚设）。
+        //
+        // 必须放在 startForegroundCompat() 之前：否则会先闪一个通知再退出。
+        // 也必须在 isCallerAllowed() 之后：避免给未授权调用者返回
+        // 「配置状态」这种信息。
+        if (!isEnabled(this)) {
+            Log.i(TAG, "OCR 服务已关闭（用户设置），拒绝启动请求");
             stopSelf(startId);
             return START_NOT_STICKY;
         }

@@ -240,7 +240,7 @@ final class MlKitEngine {
      * 把一行识别结果转成 JSON 项。
      *
      * 用「行」而不是「块」作为粒度：PP-OCR 的 native 输出就是按文本行给的，
-     * 保持同一粒度，行数、坐标、文本拼接（%xsocr_text）才会与切档位前一致。
+     * 保持同一粒度，行数、坐标、文本拼接（识别文本）才会与切档位前一致。
      */
     private static JSONObject lineToJson(Text.Line line, String text, int type)
             throws org.json.JSONException {

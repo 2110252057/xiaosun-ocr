@@ -47,12 +47,66 @@ public class PluginEditActivity extends Activity {
     private Spinner matchModeSpinner;
     private CheckBox joinNewline;
     private EditText matchInput;
+    /** 手势事件配置区（仅触发器模式可见）。 */
+    private LinearLayout gestureGroup;
+    private Spinner gsDirSpinner;
+    private CheckBox gsStrict;
+    /**
+     * 宿主用什么 action 打开了本界面，决定这是「动作」还是「触发器」。
+     *
+     *   EDIT_SETTING      → 动作（Setting）：识别屏幕文字
+     *   ACTION_EDIT_EVENT → 手势触发器（Tasker 事件）：等某个手势
+     *
+     * ★ 曾经的 EDIT_CONDITION（条件）分支已删除：条件与事件对用户来说
+     *   是完全同一件事，而事件多一层防伪校验，留着条件只会让人在
+     *   宿主的触发器列表里挑错。详见 PluginContract 里的协议说明。
+     */
+    private String pluginMode = PluginContract.MODE_SETTING;
+    /** 图片路径组的容器引用，模式切换时要用它整体隐藏。 */
+    private LinearLayout imageGroup;
+    /** 根容器，供 markActionOnly 把控件同时登记进「动作专用」列表。 */
+    private LinearLayout rootView;
+    /** 把控件加进根容器，并登记为「只有动作模式才显示」。 */
+    private void markActionOnly(View v, LinearLayout.LayoutParams lp) {
+        addToRoot(v, lp);
+        actionOnlyViews.add(v);
+    }
 
-    private static final String[] SOURCES = {"截取当前屏幕", "指定图片路径"};
+    /**
+     * 只加进根容器，不登记进「动作专用」列表。
+     *
+     * 给那种「可见性另有其主」的控件用：比如 pathGroup 由
+     * 「图片来源」下拉框控制（选了"截取当前屏幕"就该藏起来），
+     * 要是也被无脑置为 VISIBLE，切回动作模式时它会凭空冒出来。
+     */
+    private void addToRoot(View v, LinearLayout.LayoutParams lp) {
+        if (lp == null) {
+            rootView.addView(v);
+        } else {
+            rootView.addView(v, lp);
+        }
+    }
+    /** 「指定文本」相关控件的容器，模式切换时整体隐藏。 */
+    private LinearLayout matchGroup;
+    private TextView varsNote;
+    /** 各区域小节标题的容器（模式切换时连标题一起隐藏）。 */
+    private java.util.List<View> actionOnlyViews = new java.util.ArrayList<>();
+private static final String[] SOURCES = {"截取当前屏幕", "指定图片路径"};
     private static final String[] TIERS = {"tiny · 轻量（快）", "small · 高精度", "rapid · ML Kit（最快）"};
     private static final String[] TYPES = {"纯文本", "含坐标（Json）"};
     /** 匹配方式：索引对应 MODE_CONTAINS / MODE_EXACT。 */
     private static final String[] MATCH_MODES = {"包含文本", "匹配文本（完全一致）"};
+    /**
+     * 手势事件「监听方向」下拉项。
+     *
+     * 索引 0 = 任意方向（Bundle 里存空串），
+     * 索引 1..8 对应 {@code EdgeGesturePrefs.DIR_KEYS} 的 8 个方向。
+     */
+    private static final String[] GS_DIR_ITEMS = {
+            "任意方向（8 向都触发）",
+            "向上 ↑", "右上 ↗", "向右 →", "右下 ↘",
+            "向下 ↓", "左下 ↙", "向左 ←", "左上 ↖",
+    };
 
     private int C_TEXT, C_SUB, C_HINT, C_BRAND, C_DIVIDER, C_SURFACE;
 
@@ -69,30 +123,61 @@ public class PluginEditActivity extends Activity {
 
         Bundle old = null;
         Intent it = getIntent();
+        String action = it == null ? null : it.getAction();
+        // 判定宿主想让我们配什么：
+        //   ACTION_EDIT_EVENT → 手势触发器（Tasker 事件，带防伪）
+        //   其它（含 EDIT_SETTING / action 为空）→ 当作动作处理
+        //
+        // ★ 这里不再处理 EDIT_CONDITION：条件身份已从 Manifest 撤除，
+        //   插件在宿主的触发器列表里只有「小孙OCR · 边缘滑动事件」一个入口。
+        if (PluginContract.ACTION_EDIT_EVENT.equals(action)) {
+            pluginMode = PluginContract.MODE_EVENT;
+        } else {
+            pluginMode = PluginContract.MODE_SETTING;
+        }
+        boolean triggerMode = !PluginContract.MODE_SETTING.equals(pluginMode);
         if (it != null) {
             try {
                 old = it.getBundleExtra(PluginContract.EXTRA_BUNDLE);
             } catch (Throwable ignored) {
             }
         }
-
+        // 老配置里带的 plugin_mode 优先（宿主回填时更权威）。
+        if (old != null) {
+            String m = old.getString(PluginContract.KEY_PLUGIN_MODE, null);
+            if (m != null) {
+                pluginMode = m;
+                triggerMode = !PluginContract.MODE_SETTING.equals(pluginMode);
+            }
+        }
         // ---------- 根容器 ----------
         LinearLayout root = new LinearLayout(this);
+        rootView = root;
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(20), dp(16), dp(20), dp(16));
-
         TextView title = new TextView(this);
-        title.setText("小孙OCR · 插件配置");
+        // 标题跟着模式走：用户点的是「触发器」，界面却说「插件配置」会很迷惑。
+        title.setText(triggerMode ? "小孙OCR · 手势触发器" : "小孙OCR · 插件配置");
         title.setTextSize(17);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         title.setTextColor(C_TEXT);
         root.addView(title, wide());
+        if (triggerMode) {
+            TextView sub = new TextView(this);
+            sub.setText("边缘滑动手柄被滑过时触发这个宏。"
+                    + "手柄的位置、方向、触发距离等外观参数在 App 的"
+                    + "「滑动触发」页里调；这里只决定监听哪个方向。");
+            sub.setTextSize(11.5f);
+            sub.setTextColor(C_HINT);
+            sub.setLineSpacing(0f, 1.35f);
+            root.addView(sub, wideTop(6));
+        }
 
         // ---------- 图片来源 ----------
-        root.addView(sectionLabel("图片来源"), wideTop(16));
+        markActionOnly(sectionLabel("图片来源"), wideTop(16));
         sourceSpinner = new Spinner(this);
         sourceSpinner.setAdapter(spinnerAdapter(SOURCES));
-        root.addView(sourceSpinner, wide());
+        markActionOnly(sourceSpinner, wide());
 
         // 路径组（默认隐藏）
         pathGroup = new LinearLayout(this);
@@ -117,11 +202,20 @@ public class PluginEditActivity extends Activity {
         pathGroup.addView(pathHint, hintLp);
 
         pathGroup.setVisibility(View.GONE);
-        root.addView(pathGroup, wide());
+        // 注意这里用 addToRoot 而不是 markActionOnly：
+        // pathGroup 的显隐由「图片来源」下拉框掌管（选了截屏就该藏），
+        // 不能被 applyMode 无脑置为 VISIBLE。触发器模式下隐藏它
+        // 由 applyMode 里单独一段负责。
+        addToRoot(pathGroup, wide());
 
         sourceSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (!PluginContract.MODE_SETTING.equals(pluginMode)) {
+                    // 触发器模式下这整块都该藏着，别让它跳出来
+                    pathGroup.setVisibility(View.GONE);
+                    return;
+                }
                 pathGroup.setVisibility(pos == 1 ? View.VISIBLE : View.GONE);
             }
 
@@ -131,16 +225,15 @@ public class PluginEditActivity extends Activity {
         });
 
         // ---------- 模型档位 ----------
-        root.addView(sectionLabel("模型档位"), wideTop(16));
+        markActionOnly(sectionLabel("模型档位"), wideTop(16));
         tierSpinner = new Spinner(this);
         tierSpinner.setAdapter(spinnerAdapter(TIERS));
-        root.addView(tierSpinner, wide());
-
+        markActionOnly(tierSpinner, wide());
         // ---------- 输出格式 ----------
-        root.addView(sectionLabel("输出格式"), wideTop(16));
+        markActionOnly(sectionLabel("输出格式"), wideTop(16));
         typeSpinner = new Spinner(this);
         typeSpinner.setAdapter(spinnerAdapter(TYPES));
-        root.addView(typeSpinner, wide());
+        markActionOnly(typeSpinner, wide());
 
         joinNewline = new CheckBox(this);
         joinNewline.setText("多行结果用换行拼接");
@@ -149,13 +242,48 @@ public class PluginEditActivity extends Activity {
         joinNewline.setChecked(true);
         LinearLayout.LayoutParams cbLp = wide();
         cbLp.topMargin = dp(10);
-        root.addView(joinNewline, cbLp);
+        markActionOnly(joinNewline, cbLp);
+        // ---------- 手势事件配置（只有触发器模式才显示） ----------
+        //
+        // 这一段是给宏的**触发器**用的：宿主是拿 ACTION_EDIT_EVENT
+        // 打开本界面的，此时用户要配的是「什么手势算触发」，
+        // 跟上面那些「识别什么内容」无关，所以整块隐藏起来。
+        gestureGroup = new LinearLayout(this);
+        gestureGroup.setOrientation(LinearLayout.VERTICAL);
+        gestureGroup.addView(sectionLabel("监听方向"), wideTop(16));
+        gsDirSpinner = new Spinner(this);
+        gsDirSpinner.setAdapter(spinnerAdapter(GS_DIR_ITEMS));
+        gestureGroup.addView(gsDirSpinner, wide());
+        TextView gsDirHint = new TextView(this);
+        gsDirHint.setText("选「任意方向」则 8 个方向都会触发这一个宏；"
+                + "也可以只认某一个方向，给每个方向配不同的宏。");
+        gsDirHint.setTextSize(11);
+        gsDirHint.setTextColor(C_HINT);
+        gsDirHint.setLineSpacing(0f, 1.3f);
+        gestureGroup.addView(gsDirHint, wideTop(4));
+        gsStrict = new CheckBox(this);
+        gsStrict.setText("校验收到的消息（防伪造触发）");
+        gsStrict.setTextSize(13);
+        gsStrict.setTextColor(C_TEXT);
+        gsStrict.setChecked(true);
+        gestureGroup.addView(gsStrict, wideTop(10));
+        TextView gsStrictHint = new TextView(this);
+        gsStrictHint.setText("开启后只认 60 秒内由本应用签发的滑动事件，"
+                + "其它 App 伪造的同名广播会被忽略。");
+        gsStrictHint.setTextSize(11);
+        gsStrictHint.setTextColor(C_HINT);
+        gsStrictHint.setLineSpacing(0f, 1.3f);
+        gestureGroup.addView(gsStrictHint, wideTop(2));
+        gestureGroup.setVisibility(View.GONE);
+        root.addView(gestureGroup, wide());
 
         // ---------- 指定文本（可选）----------
         // 填了之后会在识别结果里查找匹配的文本块，
-        // 并通过 %xsocr_match / %xsocr_x / %xsocr_y 回传「是否存在 + 坐标」。
-        root.addView(sectionLabel("指定文本（可选）"), wideTop(16));
-
+        // 并通过变量回传「是否存在 + 坐标」。
+        // 整块放进 matchGroup：触发器模式下这些跟「什么手势算触发」无关。
+        matchGroup = new LinearLayout(this);
+        matchGroup.setOrientation(LinearLayout.VERTICAL);
+        matchGroup.addView(sectionLabel("指定文本（可选）"), wideTop(16));
         matchInput = new EditText(this);
         matchInput.setHint("例如：确定");
         matchInput.setTextSize(13);
@@ -163,24 +291,23 @@ public class PluginEditActivity extends Activity {
         matchInput.setInputType(InputType.TYPE_CLASS_TEXT);
         matchInput.setBackground(roundedBorder());
         matchInput.setPadding(dp(12), dp(10), dp(12), dp(10));
-        root.addView(matchInput, wide());
-
+        matchGroup.addView(matchInput, wide());
         // 匹配方式：包含 / 完全一致
         matchModeSpinner = new Spinner(this);
         matchModeSpinner.setAdapter(spinnerAdapter(MATCH_MODES));
         LinearLayout.LayoutParams modeLp = wide();
         modeLp.topMargin = dp(8);
-        root.addView(matchModeSpinner, modeLp);
-
+        matchGroup.addView(matchModeSpinner, modeLp);
         TextView matchHint = new TextView(this);
         matchHint.setText("「包含文本」：文本块里含这几个字就算找到（如「确定」能匹配「确定提交」）。\n"
                 + "「匹配文本」：整个文本块必须与它完全一致。\n"
-                + "不区分大小写；命中后 %xsocr_x / %xsocr_y 为该文本块左上角坐标。");
+                + "不区分大小写；命中后坐标变量为该文本块左上角坐标。");
         matchHint.setTextSize(11);
         matchHint.setTextColor(C_HINT);
         LinearLayout.LayoutParams matchHintLp = wide();
         matchHintLp.topMargin = dp(4);
-        root.addView(matchHint, matchHintLp);
+        matchGroup.addView(matchHint, matchHintLp);
+        markActionOnly(matchGroup, wide());
 
         // ---------- 按钮 ----------
         LinearLayout btns = new LinearLayout(this);
@@ -209,20 +336,12 @@ public class PluginEditActivity extends Activity {
         btns.addView(ok, okLp);
 
         // ---------- 变量说明 ----------
+        // 文案随模式切换（见 applyMode）：动作讲识别变量，触发器讲手势变量。
         TextView note = new TextView(this);
+        varsNote = note;
         note.setTextSize(11);
         note.setTextColor(C_SUB);
         note.setLineSpacing(0f, 1.35f);
-        note.setText("识别结果会通过变量回传给宏：\n"
-                + "  %xsocr_text     识别出的全部文本\n"
-                + "  %xsocr_match    指定文本是否找到（true/false）\n"
-                + "  %xsocr_x        命中处的 x 坐标（整数）\n"
-                + "  %xsocr_y        命中处的 y 坐标（整数）\n"
-                + "  %xsocr_error    出错信息（失败时）\n"
-                + "  %xsocr_time     耗时(ms)\n"
-                + "  %xsocr_tier     使用的档位\n"
-                + "\n坐标基于截图原始像素，可直接用于点击坐标。\n"
-                + "未找到时 x / y 为 -1。");
         LinearLayout.LayoutParams noteLp = wide();
         noteLp.topMargin = dp(20);
         root.addView(note, noteLp);
@@ -254,6 +373,69 @@ public class PluginEditActivity extends Activity {
         }
 
         if (old != null) applyOld(old);
+        // 最后再统一按模式刷一次可见性 ——
+        // 放在 applyOld 之后：老配置可能带 plugin_mode，回填时要覆盖掉
+        // 前面按 action 猜出来的模式（宿主的配置更权威）。
+        applyMode();
+    }
+
+    /**
+     * 按当前模式刷新界面可见性。
+     *
+     *   动作（Setting）→ 显示识别相关的全部控件，隐藏手势区
+     *   条件 / 事件    → 反过来：隐藏识别控件，显示手势区
+     *
+     * 之所以要集中在这里做，而不是各自 setVisibility：
+     * 一个区域可能由好几节组成（图片来源 + 模型档位 + 输出格式 + 指定文本），
+     * 分散着写迟早会漏掉一两个标题，出现"控件没了但标题还在"的怪界面。
+     */
+    private void applyMode() {
+        boolean triggerMode = !PluginContract.MODE_SETTING.equals(pluginMode);
+
+        for (View v : actionOnlyViews) {
+            v.setVisibility(triggerMode ? View.GONE : View.VISIBLE);
+        }
+
+        if (gestureGroup != null) {
+            gestureGroup.setVisibility(triggerMode ? View.VISIBLE : View.GONE);
+        }
+
+        // pathGroup 不归 actionOnlyViews 管（它的显隐由「图片来源」下拉框决定），
+        // 但触发器模式下要强制藏起来 —— 那边根本没有"图片来源"这个概念。
+        if (pathGroup != null) {
+            if (triggerMode) {
+                pathGroup.setVisibility(View.GONE);
+            } else {
+                boolean byPath = sourceSpinner != null
+                        && sourceSpinner.getSelectedItemPosition() == 1;
+                pathGroup.setVisibility(byPath ? View.VISIBLE : View.GONE);
+            }
+        }
+
+        // 变量说明也要换一套：触发器模式下根本没有识别文本可回传。
+        if (varsNote != null) {
+            varsNote.setText(triggerMode
+                    ? "滑动菜单的选中结果会交给宏：\n"
+                    + "  菜单索引    选中了第几项（从 0 开始；-1 = 取消）\n"
+                    + "  菜单文字    选中项的名字\n"
+                    + "  菜单动作    选中项的动作值\n"
+                    + "\n变量叫什么名字由你在 MacroDroid 里自己定，\n"
+                    + "本应用不预设名字，按你起的名接值就行。\n"
+                    + "\n方向在触发器里就选好了，方向不符的宏根本不会被触发，\n"
+                    + "宏里不需要再判断方向。"
+                    : "识别结果会作为变量交给宏：\n"
+                    + "  识别文本    识别出的全部文字\n"
+                    + "  是否找到    指定文本是否存在（true / false）\n"
+                    + "  坐标X       命中处的 x 坐标（整数）\n"
+                    + "  坐标Y       命中处的 y 坐标（整数）\n"
+                    + "  错误信息    失败时才有内容\n"
+                    + "  耗时(ms)    本次识别耗时\n"
+                    + "  模型档位    tiny / small / rapid\n"
+                    + "\n变量叫什么名字由你在 MacroDroid 里自己定，\n"
+                    + "本应用不预设名字，按你起的名接值就行。\n"
+                    + "\n坐标基于截图原始像素，可直接用于点击坐标。\n"
+                    + "未找到时 x / y 为 -1。");
+        }
     }
 
     // ==================== 配置读写 ====================
@@ -274,45 +456,89 @@ public class PluginEditActivity extends Activity {
         int mode = b.getInt(PluginContract.KEY_MATCH_MODE, PluginContract.MODE_CONTAINS);
         matchModeSpinner.setSelection(
                 mode == PluginContract.MODE_EXACT ? 1 : 0, false);
+
+        // 手势配置（触发器模式用）
+        String dir = b.getString(PluginContract.KEY_GS_DIR, "");
+        gsDirSpinner.setSelection(gsDirIndex(dir), false);
+        gsStrict.setChecked(b.getBoolean(PluginContract.KEY_GS_STRICT, true));
+    }
+
+    /** 方向名 → 下拉索引。0 = 任意方向，1..8 = DIR_KEYS 顺序。 */
+    private int gsDirIndex(String dir) {
+        if (dir == null || dir.isEmpty()) return 0;
+        for (int i = 0; i < EdgeGesturePrefs.DIR_KEYS.length; i++) {
+            if (EdgeGesturePrefs.DIR_KEYS[i].equals(dir)) return i + 1;
+        }
+        return 0;
+    }
+
+    /** 下拉索引 → 方向名。 */
+    private String gsDirValue(int pos) {
+        if (pos <= 0 || pos > EdgeGesturePrefs.DIR_KEYS.length) return "";
+        return EdgeGesturePrefs.DIR_KEYS[pos - 1];
     }
 
     private void saveConfig() {
-        int srcPos = sourceSpinner.getSelectedItemPosition();
-        String path = pathInput.getText() == null ? "" : pathInput.getText().toString().trim();
-
-        if (srcPos == 1 && path.isEmpty()) {
-            Toast.makeText(this, "请填写图片路径", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
         Bundle cfg = new Bundle();
-        cfg.putString(PluginContract.KEY_SOURCE,
-                srcPos == 1 ? PluginContract.SOURCE_PATH : PluginContract.SOURCE_SCREENSHOT);
-        cfg.putString(PluginContract.KEY_PATH, path);
+        cfg.putString(PluginContract.KEY_PLUGIN_MODE, pluginMode);
 
-        int tier = tierSpinner.getSelectedItemPosition();
-        cfg.putString(PluginContract.KEY_TIER, OCRService.tierName(tier));
+        boolean triggerMode = !PluginContract.MODE_SETTING.equals(pluginMode);
 
-        int type = typeSpinner.getSelectedItemPosition() == 1 ? 2 : 1;
-        cfg.putInt(PluginContract.KEY_TYPE, type);
-        cfg.putBoolean(PluginContract.KEY_JOIN_NEWLINE, joinNewline.isChecked());
+        String blurb;
+        if (triggerMode) {
+            // ---------- 触发器模式 ----------
+            String dir = gsDirValue(gsDirSpinner.getSelectedItemPosition());
+            boolean strict = gsStrict.isChecked();
+            cfg.putString(PluginContract.KEY_GS_DIR, dir);
+            cfg.putBoolean(PluginContract.KEY_GS_STRICT, strict);
 
-        // 指定文本（可选）：留空表示不做匹配查询
-        String matchText = matchInput.getText() == null
-                ? "" : matchInput.getText().toString().trim();
-        cfg.putString(PluginContract.KEY_MATCH_TEXT, matchText);
+            String dirLabel = dir.isEmpty()
+                    ? "任意方向"
+                    : EdgeGesturePrefs.DIR_LABELS[gsDirIndex(dir) - 1];
 
-        // 匹配方式：0=包含，1=完全一致
-        int matchMode = matchModeSpinner.getSelectedItemPosition() == 1
-                ? PluginContract.MODE_EXACT : PluginContract.MODE_CONTAINS;
-        cfg.putInt(PluginContract.KEY_MATCH_MODE, matchMode);
+            blurb = "滑动 " + dirLabel;
+            if (PluginContract.MODE_EVENT.equals(pluginMode) && !strict) {
+                blurb += " · 不校验消息";
+            }
+        } else {
+            // ---------- 动作模式 ----------
+            int srcPos = sourceSpinner.getSelectedItemPosition();
+            String path = pathInput.getText() == null
+                    ? "" : pathInput.getText().toString().trim();
 
-        String modeName = matchMode == PluginContract.MODE_EXACT ? "匹配" : "包含";
+            if (srcPos == 1 && path.isEmpty()) {
+                Toast.makeText(this, "请填写图片路径", Toast.LENGTH_SHORT).show();
+                return;
+            }
 
-        String blurb = (srcPos == 1 ? "路径" : "截屏")
-                + " · " + OCRService.tierName(tier)
-                + " · " + (type == 1 ? "纯文本" : "含坐标")
-                + (matchText.isEmpty() ? "" : " · " + modeName + "「" + matchText + "」");
+            cfg.putString(PluginContract.KEY_SOURCE,
+                    srcPos == 1 ? PluginContract.SOURCE_PATH : PluginContract.SOURCE_SCREENSHOT);
+            cfg.putString(PluginContract.KEY_PATH, path);
+
+            int tier = tierSpinner.getSelectedItemPosition();
+            cfg.putString(PluginContract.KEY_TIER, OCRService.tierName(tier));
+
+            int type = typeSpinner.getSelectedItemPosition() == 1 ? 2 : 1;
+            cfg.putInt(PluginContract.KEY_TYPE, type);
+            cfg.putBoolean(PluginContract.KEY_JOIN_NEWLINE, joinNewline.isChecked());
+
+            // 指定文本（可选）：留空表示不做匹配查询
+            String matchText = matchInput.getText() == null
+                    ? "" : matchInput.getText().toString().trim();
+            cfg.putString(PluginContract.KEY_MATCH_TEXT, matchText);
+
+            // 匹配方式：0=包含，1=完全一致
+            int matchMode = matchModeSpinner.getSelectedItemPosition() == 1
+                    ? PluginContract.MODE_EXACT : PluginContract.MODE_CONTAINS;
+            cfg.putInt(PluginContract.KEY_MATCH_MODE, matchMode);
+
+            String modeName = matchMode == PluginContract.MODE_EXACT ? "匹配" : "包含";
+
+            blurb = (srcPos == 1 ? "路径" : "截屏")
+                    + " · " + OCRService.tierName(tier)
+                    + " · " + (type == 1 ? "纯文本" : "含坐标")
+                    + (matchText.isEmpty() ? "" : " · " + modeName + "「" + matchText + "」");
+        }
 
         Intent result = new Intent();
         result.putExtra(PluginContract.EXTRA_BUNDLE, cfg);
@@ -327,7 +553,14 @@ public class PluginEditActivity extends Activity {
         //   参考 PP-OCRv6 插件（实测能正常传变量）的 ActionEditActivity，
         //   它就是这样拼的：sb.append("%ocr_full_text\n").append(标签).append("\n").append(描述)。
         //   只传裸变量名虽然也能列出，但界面可读性差、部分宿主解析不稳。
-        PluginContract.addRelevantVariableList(result);
+        //
+        //   触发器模式只预告菜单变量：那个场景里没有 OCR 识别，
+        //   混进识别文本之类只会让人以为还得配图片路径。
+        if (triggerMode) {
+            PluginContract.addMenuVariableList(result);
+        } else {
+            PluginContract.addRelevantVariableList(result);
+        }
 
         // 顺便申请更长的超时（部分宿主会读，MacroDroid 不读也无害）。
         // PP-OCR 也这么做了：requestTimeoutMS(intent, 120000)。
