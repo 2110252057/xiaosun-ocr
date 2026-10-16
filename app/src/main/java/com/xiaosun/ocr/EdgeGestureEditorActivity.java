@@ -478,63 +478,23 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
     // ============================================================
 
     private void buildGestureSection(LinearLayout parent) {
-        parent.addView(label("触发时机"), topMargin(22));
+        // 「触发时机」单选已下线。
+        //
+        // 原先有三个选项：「滑过距离时触发」「按下手柄时触发」
+        // 「滑动未达距离后抬手时触发」。后两个实际用起来问题更多：
+        // 按下即触发会和滑动菜单、误触搅在一起；抬手触发场景很少，
+        // 还容易和「滑了但该方向没启用」混淆。现在只剩一种时机，
+        // 没有可选项，这一段就只留说明文字了。
+        parent.addView(label("触发方式"), topMargin(22));
 
-        final TextView[] marks = new TextView[EdgeGesturePrefs.EVENT_LABELS.length];
-        for (int i = 0; i < EdgeGesturePrefs.EVENT_LABELS.length; i++) {
-            final int idx = i;
-
-            LinearLayout item = new LinearLayout(this);
-            item.setOrientation(LinearLayout.HORIZONTAL);
-            item.setGravity(Gravity.CENTER_VERTICAL);
-            item.setPadding(0, dp(7), 0, dp(7));
-
-            TextView radio = new TextView(this);
-            radio.setTextSize(11);
-            radio.setGravity(Gravity.CENTER);
-            marks[i] = radio;
-            item.addView(radio, new LinearLayout.LayoutParams(dp(24), dp(24)));
-
-            TextView txt = new TextView(this);
-            txt.setText(EdgeGesturePrefs.EVENT_LABELS[i]);
-            txt.setTextSize(13.5f);
-            txt.setTextColor(C_TEXT);
-            txt.setPadding(dp(6), 0, 0, 0);
-            item.addView(txt, new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-            item.setOnClickListener(v -> {
-                handle.event = idx;
-                refreshEventMarks(marks);
-                persist(true);
-            });
-
-            parent.addView(item, wide());
-        }
-        refreshEventMarks(marks);
-
-        parent.addView(note("「滑动超过距离」在手指滑到位的那一刻就触发，"
-                + "不用抬手；抬手只是复位，方便连续操作。\n"
-                + "后两项不区分方向，方向变量会回传空值。"), topMargin(4));
+        parent.addView(note("滑动超过下面设定的距离时立即触发，不用抬手；"
+                + "抬手只是复位，方便连续操作。"), topMargin(4));
 
         addSlider(parent, "滑动距离", handle.threshold, 10, 400, "dp",
                 v -> handle.threshold = v, true);
         parent.addView(note("手指位移超过这个距离就算触发。"
                 + "90dp 大约是一根手指宽度的两倍，适合大多数场景；"
                 + "握持不稳时可调到 120dp 以上。"), topMargin(2));
-    }
-
-    private void refreshEventMarks(TextView[] marks) {
-        for (int i = 0; i < marks.length; i++) {
-            boolean on = (handle.event == i);
-            GradientDrawable g = new GradientDrawable();
-            g.setShape(GradientDrawable.OVAL);
-            g.setColor(Color.TRANSPARENT);
-            g.setStroke(dp(2), on ? C_BRAND : C_HINT);
-            marks[i].setBackground(g);
-            marks[i].setText(on ? "●" : "");
-            marks[i].setTextColor(C_BRAND);
-        }
     }
 
     // ============================================================

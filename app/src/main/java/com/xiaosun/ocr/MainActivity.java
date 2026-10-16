@@ -109,6 +109,14 @@ public class MainActivity extends AppCompatActivity {
     private final TextView[] tabTexts = new TextView[tabs.length];
     /** 「滑动触发」页的状态文字（服务未运行时为 null）。 */
     private TextView tvGestureState;
+    /**
+     * 「滑动菜单」卡片右侧那行状态文案。
+     *
+     * 提成成员是因为它需要能单独刷新：用户在菜单配置页里开关了菜单、
+     * 增删了菜单项，返回本页时这行字必须跟着变，否则显示的还是进来时那次
+     * 的快照（"未启用"却其实已启用）。
+     */
+    private TextView tvMenuSub;
 
     private TextView tvStatusDot;
     private TextView tvStatusText;
@@ -220,6 +228,9 @@ public class MainActivity extends AppCompatActivity {
         OCRService.applyRecents(this);
         // 从手势设置页返回、或刚被划掉后重新进来时，开关/权限/运行状态可能都变了。
         refreshGestureState();
+        // 「滑动菜单」的开关与项数是在子页里改的，返回本页必须重读，
+        // 否则卡片上还写着进来时那次的旧状态。
+        refreshMenuCard();
     }
 
     /**
@@ -404,6 +415,7 @@ public class MainActivity extends AppCompatActivity {
         // 切页时把还排着的状态重试链掐掉：旧页面马上就不存在了，重试没有意义。
         cancelGestureRecheck();
         tvGestureState = null;
+        tvMenuSub = null;
         if (index == 0) {
             buildOcrSettingsPage(contentContainer);
         } else {
@@ -661,19 +673,12 @@ public class MainActivity extends AppCompatActivity {
         t.setTypeface(null, Typeface.BOLD);
         t.setTextColor(C_TEXT);
         col.addView(t);
-        boolean on = EdgeGesturePrefs.isMenuEnabled(this);
-        int n = EdgeGesturePrefs.getMenuItems(this).size();
         TextView sub = new TextView(this);
         sub.setTextSize(11.5f);
         sub.setTextColor(C_HINT);
         sub.setLineSpacing(0f, 1.35f);
-        if (!on) {
-            sub.setText("未启用 · 现在是「滑过距离立即触发」");
-        } else if (n == 0) {
-            sub.setText("已启用，但一项都没配 —— 先添加菜单项");
-        } else {
-            sub.setText("已启用 · " + n + " 项 · 滑出后不抬手就能选");
-        }
+        tvMenuSub = sub;
+        refreshMenuCard();
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         sl.topMargin = dp(3);
@@ -690,6 +695,30 @@ public class MainActivity extends AppCompatActivity {
         card.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         parent.addView(card, cardLp());
+    }
+
+    /**
+     * 刷新「滑动菜单」卡片的状态文案。
+     *
+     * 开关与菜单项都由 {@link EdgeGestureMenuActivity} 改，
+     * 本页只负责如实显示；所以每次回到前台都要重读一次 Prefs。
+     *
+     * tvMenuSub 为 null 时（没打开「滑动触发」页 / 页面重建中）安全跳过，
+     * 与 {@link #refreshGestureState()} 的写法一致。
+     */
+    private void refreshMenuCard() {
+        if (tvMenuSub == null) {
+            return;
+        }
+        boolean on = EdgeGesturePrefs.isMenuEnabled(this);
+        int n = EdgeGesturePrefs.getMenuItems(this).size();
+        if (!on) {
+            tvMenuSub.setText("未启用 · 现在是「滑过距离立即触发」");
+        } else if (n == 0) {
+            tvMenuSub.setText("已启用，但一项都没配 —— 先添加菜单项");
+        } else {
+            tvMenuSub.setText("已启用 · " + n + " 项 · 滑出后不抬手就能选");
+        }
     }
 
     /** 方块提示卡里的一行（标题 + 说明）。 */

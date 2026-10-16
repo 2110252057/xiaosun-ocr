@@ -135,18 +135,24 @@ public final class EdgeGesturePrefs {
     //  触发时机
     // ============================================================
 
-    /** 滑过阈值的那一刻就触发（默认，「不用抬手」指的就是这个）。 */
+    /**
+     * 触发时机：滑过阈值的那一刻就触发（「不用抬手」指的就是这个）。
+     *
+     * ★ 这里原本还有两个时机，现已**移除**：
+     *   · EVENT_START(1)  「按下手柄时触发」—— 手指一碰手柄宏就跑，
+     *     和滑动菜单 / 误触搅在一起，想滑一下却先把宏触发了；
+     *   · EVENT_CANCEL(2)「滑动未达距离后抬手时触发」—— 实际场景很少，
+     *     还容易和「滑了但该方向没启用」混淆，表现为「手柄像失灵了」。
+     *
+     * 现在只保留最直觉的一种：滑过距离即触发。
+     * 编号仍为 0 —— 老配置里存的 event=1/2 会在读取时被归零，
+     * 升级后行为自动收敛，不会出现两种行为并存。
+     */
     public static final int EVENT_TRIGGER = 0;
-    /** 刚按下、还没滑动 —— 可以做「准备动作」。 */
-    public static final int EVENT_START = 1;
-    /** 滑了但没到阈值就抬手 / 滑出取消 —— 可以做「放弃」逻辑。 */
-    public static final int EVENT_CANCEL = 2;
 
-    public static final String[] EVENT_KEYS = {"trigger", "start", "cancel"};
+    public static final String[] EVENT_KEYS = {"trigger"};
     public static final String[] EVENT_LABELS = {
-            "滑动超过距离时触发（推荐·不用抬手）",
-            "按下手柄时触发（滑动前）",
-            "滑动未达距离后抬手时触发"
+            "滑动超过距离时触发（不用抬手）"
     };
 
     // ============================================================
@@ -188,7 +194,12 @@ public final class EdgeGesturePrefs {
         /** 滑动距离阈值（dp）—— 超过它就触发（或进入“已触发”状态）。 */
         public int threshold = 90;
 
-        /** 触发时机，见 EVENT_*。 */
+        /**
+         * 触发时机，恒为 {@link #EVENT_TRIGGER}。
+         *
+         * 字段保留只是为了兼容老配置 JSON（那里可能存着 1/2），
+         * 读取时一律归零 —— 另外两种时机已下线。
+         */
         public int event = EVENT_TRIGGER;
 
         /** 每个方向是否启用。 */
@@ -717,7 +728,8 @@ public final class EdgeGesturePrefs {
         o.put("alpha", h.alpha);
         o.put("radius", h.radius);
         o.put("threshold", h.threshold);
-        o.put("event", h.event);
+        // 只写 0：另外两种时机已下线（见 EVENT_TRIGGER 的注释）
+        o.put("event", EVENT_TRIGGER);
         o.put("haptic", h.haptic);
         o.put("blockGesture", h.blockGesture);
 
@@ -745,7 +757,9 @@ public final class EdgeGesturePrefs {
         h.alpha = clamp(o.optInt("alpha", 100), 0, 100);
         h.radius = clamp(o.optInt("radius", 12), 0, 100);
         h.threshold = clamp(o.optInt("threshold", 90), 10, 600);
-        h.event = clamp(o.optInt("event", EVENT_TRIGGER), 0, 2);
+        // ★ 不读回原值：老配置里可能存着 1（按下触发）/ 2（抬手触发），
+        //   这里一律归零，升级后行为收敛到「滑过触发」。
+        h.event = EVENT_TRIGGER;
         h.haptic = o.optBoolean("haptic", true);
         h.blockGesture = o.optBoolean("blockGesture", true);
 
@@ -826,6 +840,67 @@ public final class EdgeGesturePrefs {
         menuIndex = index;
         menuText = text == null ? "" : text;
         menuAction = action == null ? "" : action;
+    }
+
+    /**
+     * 把「要监听的方向」同步到**所有手柄**的可触发方向里。
+     *
+     * ── 为什么需要它 ─────────────────────────────────────
+     * MacroDroid / Tasker 的触发器里用户已经选过一次方向了（"向上"、"向右"…）。
+     * 但手势的生效判定在服务里是 {@code handle.enabled[dir]} ——
+     * 方向没在手柄里打开，滑了也不触发。于是用户配完触发器还得回到
+     * 手柄编辑页把同一个方向再勾一遍，两处配置割裂、极易漏掉。
+     * 本方法就是把触发器选的那个方向直接落到手柄上。
+     *
+     * ── 为什么是「只打开、不关闭」 ───────────────────────
+     * 触发器表达的只是"我要监听 X"，它**没有资格**关掉用户另外开的方向。
+     * 否则配第二个宏（比如监听"向右"）就会把第一个宏依赖的"向上"关掉，
+     * 表现为"先配的宏突然不灵了"。
+     * 想收窄方向请到手柄编辑页手动关 —— 那里能看到每个方向的开关状态。
+     *
+     * @param dirKey 方向名（{@link #DIR_KEYS} 里的值）；
+     *               空串或 null = 任意方向，八个方向全部打开
+     * @return 真正被改动的方向个数（0 = 无需改动）
+     */
+    public static int enableDirectionsForAllHandles(Context c, String dirKey) {
+        try {
+            List<Handle> all = getHandles(c);
+            if (all == null || all.isEmpty()) return 0;
+
+            // 算出这次要打开哪些方向
+            boolean[] want = new boolean[DIR_KEYS.length];
+            boolean any = (dirKey == null || dirKey.isEmpty());
+            if (any) {
+                for (int i = 0; i < want.length; i++) want[i] = true;
+            } else {
+                for (int i = 0; i < DIR_KEYS.length; i++) {
+                    if (DIR_KEYS[i].equals(dirKey)) {
+                        want[i] = true;
+                        break;
+                    }
+                }
+                // 方向名不认识 —— 不动任何东西，避免误开全方向
+                boolean matched = false;
+                for (boolean b : want) if (b) matched = true;
+                if (!matched) return 0;
+            }
+
+            int changed = 0;
+            for (Handle h : all) {
+                for (int i = 0; i < DIR_KEYS.length; i++) {
+                    if (want[i] && !h.enabled[i]) {
+                        h.enabled[i] = true;
+                        changed++;
+                    }
+                }
+            }
+            if (changed > 0) {
+                saveHandles(c, all);
+            }
+            return changed;
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /** 每触发一次就刷新一次运行时快照。 */

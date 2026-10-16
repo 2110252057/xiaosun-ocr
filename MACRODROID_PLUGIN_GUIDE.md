@@ -658,7 +658,7 @@ vars.putString(VAR_TIER, tier);
 public static volatile String gsLastDirection = "";      // left / right / ...
 public static volatile String gsLastDirectionLabel = ""; // 向左 / 向右 / ...
 public static volatile String gsLastHandle = "";         // 手柄名
-public static volatile String gsLastEvent = "";          // trigger / start / cancel
+public static volatile String gsLastEvent = "";          // 恒为 "trigger"（另两种时机已下线）
 public static volatile int    gsSeq = 0;                 // 每触发一次 +1
 public static volatile long   gsLastAt = 0L;             // 毫秒时间戳
 // 菜单结果
@@ -694,6 +694,17 @@ public static volatile String menuAction = "";
 > 它每次滑动都往系统里扔一条人人可收的隐式广播，既多一次跨进程唤醒，
 > 又不带任何防伪信息 —— 谁都能照着抄一条来骗过监听方的宏。
 > 插件通道能直接回传变量，已覆盖全部用法。
+
+**方向选了会自动同步到手柄**：手势能不能触发，服务里判的是 `handle.enabled[dir]`。
+配置界面里选定方向后，`EdgeGesturePrefs.enableDirectionsForAllHandles()` 会把这个方向
+在**所有手柄**上打开（改动了才 `EdgeGestureService.reload()` 让服务立刻重建，即改即生效）。
+不这么做的话，用户在触发器里选了「向上」，手柄的「向上」其实没开，滑了不触发 ——
+还得回手柄编辑页再勾一次，两处配置割裂、极易漏。
+
+> 策略是「**只打开、不关闭**」：触发器表达的只是"我要监听 X"，它没有资格关掉
+> 用户另外开的方向。否则配第二个宏（比如监听「向右」）就会把第一个宏依赖的
+> 「向上」关掉，表现为"先配的宏突然不灵了"。想收窄方向请到手柄编辑页手动关 ——
+> 那里能看到每个方向的开关状态。
 
 ### 7.5 ★ 让插件出现在「触发器」列表里（事件协议）
 

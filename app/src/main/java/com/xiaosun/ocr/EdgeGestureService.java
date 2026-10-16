@@ -1583,10 +1583,8 @@ extends Service {
                     this.dragStartY = this.dragAnchor();
                     EdgeGestureService.this.ui.removeCallbacks(this.longPress);
                     EdgeGestureService.this.ui.postDelayed(this.longPress, 380L);
-                    if (this.handle.event == 1 && !this.menuConfigured()) {
-                        this.fired = true;
-                        EdgeGestureService.this.fire(this.handle, -1);
-                    }
+                    // 「按下手柄时触发」分支已下线（见 EVENT_TRIGGER 注释）：
+                    // 手指一碰手柄就发宏，和滑动菜单、误触混在一起。
                     this.invalidate();
                     return true;
                 }
@@ -1618,7 +1616,7 @@ extends Service {
                     if (!this.moved) {
                         return true;
                     }
-                    if (this.handle.event == 0 && !this.fired && (dir = EdgeGestureService.dirOf(dx, dy)) >= 0 && this.handle.enabled[dir] && dist >= (float)this.dp(this.handle.distanceOf(dir))) {
+                    if (!this.fired && (dir = EdgeGestureService.dirOf(dx, dy)) >= 0 && this.handle.enabled[dir] && dist >= (float)this.dp(this.handle.distanceOf(dir))) {
                         this.fired = true;
                         if (this.menuConfigured() && this.tryOpenMenu(dir, e.getRawX(pi), e.getRawY(pi))) {
                             return true;
@@ -1676,9 +1674,9 @@ extends Service {
                     if (this.dragMode) {
                         this.dragMode = false;
                         this.applyDragEnd();
-                    } else if (!this.fired && this.moved && this.handle.event == 2) {
-                        EdgeGestureService.this.fire(this.handle, -1);
                     }
+                    // 「滑动未达距离后抬手时触发」分支已下线
+                    // （见 EVENT_TRIGGER 注释）：抬手不再触发任何宏。
                     this.fired = false;
                     this.moved = false;
                     this.setAlpha(1.0f);

@@ -207,8 +207,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         Switch sw = new Switch(this);
         sw.setChecked(EdgeGesturePrefs.isMenuEnabled(this));
         sw.setOnCheckedChangeListener((b, on) -> {
-            // 一项都没配的时候不给开：开了也是白开（滑动什么都不会弹），
-            // 还会把「按下即触发」的 EVENT_START 一起停掉，反而更让人困惑。
+            // 一项都没配的时候不给开：开了也是白开（滑动什么都不会弹）。
             if (on && items.isEmpty()) {
                 b.setChecked(false);
                 toast("先添加至少一个菜单项");
