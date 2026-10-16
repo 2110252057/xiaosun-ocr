@@ -1660,25 +1660,40 @@ extends Service {
                         }
                         int dir = this.menuOpenDir;
                         if (up) {
-                            if (idx >= 0 && idx < this.menuItems.size()) {
+                            boolean picked = (idx >= 0 && idx < this.menuItems.size());
+                            if (picked) {
                                 EdgeGesturePrefs.MenuItem it = this.menuItems.get(idx);
                                 AppLog.i(EdgeGestureService.TAG, "菜单选中: 索引=" + idx
                                         + " 文字=" + it.text + " 动作=" + it.action
                                         + " 方向=" + dir);
                                 EdgeGesturePrefs.recordMenuChoice(idx, it.text, it.action);
                             } else {
-                                AppLog.i(EdgeGestureService.TAG, "菜单取消（抬手处没命中任何项）: 手指=("
-                                        + (int)e.getX() + "," + (int)e.getY() + ")"
-                                        + " —— 本次不回传菜单变量");
                                 EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             }
                             this.closeMenu();
-                            EdgeGestureService.this.fire(this.handle, dir);
+                            // ★ 没选中图标就**什么都不发**。
+                            //
+                            //   不广播 REQUEST_QUERY，宿主（MacroDroid / Tasker）
+                            //   压根不知道发生过这次手势，自然不会回问
+                            //   QUERY_CONDITION —— 宏不会被触发，也就谈不上
+                            //   收到变量。
+                            //
+                            //   这是有意的：菜单弹出来又滑到空白处松手，
+                            //   用户的意思就是"算了"。让宏跑起来（尤其跑成
+                            //   上一次的旧结果）比"没反应"更糟。
+                            if (picked) {
+                                EdgeGestureService.this.fire(this.handle, dir);
+                            } else {
+                                AppLog.i(EdgeGestureService.TAG,
+                                        "菜单没选中图标（抬手处不在任何项上）"
+                                        + " —— 不通知宿主，宏不触发");
+                            }
                         } else {
                             // 这批触摸被系统抢走（ACTION_CANCEL），没等到抬手，
-                            // 同样按「没选中」处理 —— 不回传菜单变量。
+                            // 同样按「没选中」处理 —— 不通知宿主，宏不触发。
                             AppLog.i(EdgeGestureService.TAG,
-                                    "菜单取消（触摸被系统抢走，未抬手）—— 本次不回传菜单变量");
+                                    "菜单取消（触摸被系统抢走，未抬手）"
+                                    + " —— 不通知宿主，宏不触发");
                             EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             this.closeMenu();
                         }
