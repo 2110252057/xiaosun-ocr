@@ -125,6 +125,11 @@ public class PluginConditionReceiver extends BroadcastReceiver {
         }
 
         // ---------- 通道 B：ResultReceiver ----------
+        // 记一条：事件触发器的变量就是靠这两条通道回宿主的。
+        // 「宏被触发了但变量是空的」时，看这条就知道我们到底送没送、送了几项。
+        AppLog.i(TAG, "条件应答: 结果码=" + code
+                + " 变量=" + (vars == null ? 0 : vars.size())
+                + " 变量名=" + (vars == null ? "" : vars.keySet()));
         if (intent == null || vars == null || vars.isEmpty()) return;
         try {
             // 用 getParcelableExtra 的**旧签名**：minSdk 24 上还没有

@@ -169,6 +169,9 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // 装日志（幂等）。最先装 —— 后面任何一步崩了都能留下堆栈。
+        AppLog.install(this);
+
         // 把「从最近任务隐藏」对齐到设置值。
         // AppTask.setExcludeFromRecents 是就地生效的，不会重建界面。
         OCRService.applyRecents(this);
@@ -1224,6 +1227,11 @@ public class MainActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         resLp.topMargin = dp(4);
         parent.addView(tvResult, resLp);
+
+        // ---------- 日志 ----------
+        // 放在识别结果之后：出问题时用户才往下找，平时不碍事。
+        addSectionTitle(parent, "日志与排障");
+        addCard(parent, LogCard.build(this));
 
         // ---------- 事件 ----------
         btnOcr.setOnClickListener(v -> startOcr());

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   FileProvider 的可分享路径白名单。
+
+   只开一个 logs/ 目录 —— 日志文件就在 Android/data/com.xiaosun.ocr/files/logs/ 下。
+   白名单务必写到具体子目录，不要整片 external-files-path，
+   否则应用私有目录里的任何文件都能被别的应用通过 content:// 读走。
+-->
+<paths>
+    <external-files-path
+        name="app_logs"
+        path="logs/" />
+    <!-- 外部目录拿不到时 file() 会退回内部目录，这里同样放行 -->
+    <files-path
+        name="app_logs_internal"
+        path="logs/" />
+</paths>

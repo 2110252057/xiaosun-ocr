@@ -46,7 +46,8 @@ MacroDroid 的插件机制基于 **Locale/Tasker 插件规范**（`com.twofortyf
 │                                                             │
 │  ┌── 异步路径（推荐，无超时限制）───────────────────────┐      │
 │  │  插件先回 RESULT_CODE_PENDING(3)                     │      │
-│  │  → 干完活 → signalFinish() 往 COMPLETION_INTENT 发广播 │      │
+│  │  → 干完活 → signalFinish() 把结果送到预置的回调地址  │      │
+│  │  （宿主指定 Service 就用 Service，否则就发广播）       │      │
 │  │  → LocaleTaskerSettingCompleteReceiver 接收           │      │
 │  │  → t6g.b() 写入宏变量                                │      │
 │  └──────────────────────────────────────────────────┘       │
@@ -377,12 +378,23 @@ public static boolean signalFinish(Context ctx, Intent fromHost,
         }
 
         // ④ 宿主可能要求用 Service 接收（而不是广播）
-        String pkg = fromHost.getStringExtra(
+        //    ★ 这三个值必须从 **completion** 上读，不能从 fromHost 读！
+        //    它们是宿主在把回调地址序列化成 URI 之前，放进 completion intent 里的；
+        //    原始 fromHost intent 上没有这三项，从那儿读恒为 null，
+        //    于是一律走广播 —— MacroDroid 收广播没问题，
+        //    但 **Tasker 是按 Service 收结果的，广播到不了它手里，变量全丢**。
+        //    （这是 2026-10 真实踩过的坑，对照 Tasker 官方 TaskerPlugin.java 才定位到。）
+        String pkg = completion.getStringExtra(
                 "net.dinglisch.android.tasker.EXTRA_CALL_SERVICE_PACKAGE");
-        String cls = fromHost.getStringExtra(
+        String cls = completion.getStringExtra(
                 "net.dinglisch.android.tasker.EXTRA_CALL_SERVICE");
-        Boolean fg = (Boolean) fromHost.getExtras()
+        Boolean fg = (Boolean) completion.getExtras()
                 .get("net.dinglisch.android.tasker.EXTRA_CALL_SERVICE_FOREGROUND");
+        // 兜底：万一某些宿主把它放在原始 intent 上（只加不减，不影响已有行为）
+        if (pkg == null) pkg = fromHost.getStringExtra(
+                "net.dinglisch.android.tasker.EXTRA_CALL_SERVICE_PACKAGE");
+        if (cls == null) cls = fromHost.getStringExtra(
+                "net.dinglisch.android.tasker.EXTRA_CALL_SERVICE");
 
         if (pkg != null && cls != null) {
             completion.setComponent(new ComponentName(pkg, cls));
@@ -558,13 +570,13 @@ PendingResult pending = goAsync();
 ```java
 public static final String VAR_TEXT  = "%xsocr_text";
 public static final String VAR_MATCH = "%xsocr_match";
-public static final String VAR_X     = "%xsocr_x";   // 整数
-public static final String VAR_Y     = "%xsocr_y";   // 整数
+public static final String VAR_X     = "%xsocr_x";   // 数字，但回传必须是字符串
+public static final String VAR_Y     = "%xsocr_y";   // 数字，但回传必须是字符串
 public static final String VAR_ERROR = "%xsocr_error";
 public static final String VAR_TIME  = "%xsocr_time";
 public static final String VAR_TIER  = "%xsocr_tier";
 // 滑动菜单（触发器路径，见 7.4 / 7.6）
-public static final String VAR_MENU_INDEX  = "%xsocr_menu_index";   // 整数
+public static final String VAR_MENU_INDEX  = "%xsocr_menu_index";   // 数字，但回传必须是字符串
 public static final String VAR_MENU_TEXT   = "%xsocr_menu_text";
 public static final String VAR_MENU_ACTION = "%xsocr_menu_action";
 ```
@@ -585,8 +597,8 @@ public static final String VAR_MENU_ACTION = "%xsocr_menu_action";
 public static final String[] ALL_VARIABLES = {
     VAR_TEXT  + "\n识别文本\n识别出的全部文字（多行用换行连接）",
     VAR_MATCH + "\n是否找到\n指定的文本是否存在（true / false）",
-    VAR_X     + "\n坐标X\n指定文本命中处的 x 坐标（整数）",
-    VAR_Y     + "\n坐标Y\n指定文本命中处的 y 坐标（整数）",
+    VAR_X     + "\n坐标X\n指定文本命中处的 x 坐标（数字文本）",
+    VAR_Y     + "\n坐标Y\n指定文本命中处的 y 坐标（数字文本）",
     VAR_ERROR + "\n错误信息\n失败时才有内容",
     VAR_TIME  + "\n耗时(ms)\n本次识别耗时",
     VAR_TIER  + "\n模型档位\ntiny / small / rapid",
@@ -602,20 +614,37 @@ public static final String[] ALL_VARIABLES = {
 > 触发器场景里根本没有 OCR 识别，把识别文本 / 坐标列出来
 > 只会让人以为配个手势还要填图片路径。
 
-### 7.3 回传（含整数变量）
+### 7.3 回传（**值一律是字符串**）
 
 ```java
 Bundle vars = new Bundle();
 vars.putString(VAR_TEXT, sb.toString());
 vars.putString(VAR_MATCH, matched ? "true" : "false");
-vars.putInt(VAR_X, matchX);        // ★ 整数用 putInt
-vars.putInt(VAR_Y, matchY);
+// ★ 坐标、索引这类「数字」也必须写成字符串，不能 putInt：
+//   Tasker 官方的变量协议只接受 String / String[] / ArrayList<String>，
+//   回 Integer 会被静默丢弃 —— 表现为「文字变量能到、数字变量到不了」。
+vars.putString(VAR_X, String.valueOf(matchX));
+vars.putString(VAR_Y, String.valueOf(matchY));
 vars.putString(VAR_ERROR, "");
 vars.putString(VAR_TIME, String.valueOf(cost));
 vars.putString(VAR_TIER, tier);
 ```
-> ⚠️ **读取时不能用 `getString()`**——对 Integer 会抛 `ClassCastException`。
-> 遍历保存时用 `String.valueOf(bundle.get(key))`。
+
+> ⚠️ **这是一个真实踩过的坑（2026-10）**：原先坐标与菜单索引用 `putInt()` 回传，
+> 理由是「语意上是数字、更规范」。结果变量在 MacroDroid 里一切正常，
+> 在 **Tasker 里却收不到** —— 因为 Tasker 只认字符串值，Integer 会被丢掉；
+> MacroDroid 内部对每个值统一 `toString()`，所以不挑类型。
+>
+> 官方 `TaskerPlugin.addVariableBundle` 的 javadoc 原文：
+>
+> ```
+> * Names must be valid Tasker local variable names.
+> * Values must be String, String [] or ArrayList<String>
+> ```
+>
+> 结论：**回传宿主的值，一律用字符串**。内部自己看的快照可以另存数字，
+> 但发给宿主的那份必须是字符串。遍历保存时统一用
+> `String.valueOf(bundle.get(key))`，对任何类型都安全。
 
 ### 7.4 把「边缘滑动手势」接进插件
 

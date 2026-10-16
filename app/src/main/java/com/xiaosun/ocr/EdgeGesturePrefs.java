@@ -52,6 +52,10 @@ public final class EdgeGesturePrefs {
     private static final String KEY_MENU_ICON_DP = "menu_icon_dp";
     private static final String KEY_MENU_SHOW_TEXT = "menu_show_text";
     private static final String KEY_MENU_LAYOUT = "menu_layout";
+    /** 防烧屏漂移：总开关 / 幅度(dp) / 间隔(秒)。 */
+    private static final String KEY_BURNIN = "burnin";
+    private static final String KEY_BURNIN_RANGE = "burnin_range";
+    private static final String KEY_BURNIN_INTERVAL = "burnin_interval";
     /**
      * 斜排布局「每排最多几项」的**默认值**（放不下就在上方再加一排）。
      *
@@ -504,6 +508,45 @@ public final class EdgeGesturePrefs {
 
     public static void setMenuSelColor(Context c, int argb) {
         sp(c).edit().putInt(KEY_MENU_SEL_COLOR, argb).apply();
+    }
+
+    // ============================================================
+    //  防烧屏（像素漂移）
+    // ============================================================
+
+    /**
+     * 手柄是常驻悬浮窗，长期钉在同一位置，OLED 屏会沿它的形状留下残影。
+     *
+     * 开启后让窗口每隔一段时间在**垂直方向**随机挪几个像素：幅度很小、
+     * 几乎看不出来，但发光像素的位置错开了，残影就不容易堆积。
+     *
+     * 默认开 —— 这是保护性功能，且幅度小到无感；不想要可以关掉，
+     * 或把幅度设成 0。
+     */
+    public static boolean isBurnInEnabled(Context c) {
+        return sp(c).getBoolean(KEY_BURNIN, true);
+    }
+
+    public static void setBurnInEnabled(Context c, boolean on) {
+        sp(c).edit().putBoolean(KEY_BURNIN, on).apply();
+    }
+
+    /** 漂移幅度（dp），0 = 原地不动。 */
+    public static int getBurnInRangeDp(Context c) {
+        return clamp(sp(c).getInt(KEY_BURNIN_RANGE, 8), 0, 30);
+    }
+
+    public static void setBurnInRangeDp(Context c, int dp) {
+        sp(c).edit().putInt(KEY_BURNIN_RANGE, clamp(dp, 0, 30)).apply();
+    }
+
+    /** 漂移间隔（秒）。 */
+    public static int getBurnInIntervalSec(Context c) {
+        return clamp(sp(c).getInt(KEY_BURNIN_INTERVAL, 60), 15, 300);
+    }
+
+    public static void setBurnInIntervalSec(Context c, int sec) {
+        sp(c).edit().putInt(KEY_BURNIN_INTERVAL, clamp(sec, 15, 300)).apply();
     }
 
     /**

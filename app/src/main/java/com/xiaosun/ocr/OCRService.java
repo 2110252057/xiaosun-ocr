@@ -736,6 +736,7 @@ private static final String PREFS = "xsocr_prefs";
     @Override
     public void onCreate() {
         super.onCreate();
+        AppLog.install(this);
         // 【总开关拦截·第一道】必须在**这一行的后面之前**做完：
         // onCreate 一旦继续往下走，就会 startForegroundCompat()（弹通知）、
         // startHttpServer()（监听端口）、以及后台线程加载模型 ——

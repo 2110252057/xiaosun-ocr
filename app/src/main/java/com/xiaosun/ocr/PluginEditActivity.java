@@ -561,6 +561,15 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         } else {
             PluginContract.addRelevantVariableList(result);
         }
+        // 「变量收不到」有两个前提，缺一不可：
+        //   ① 配置时必须把变量名**预告**给宿主（就是上面这一步）
+        //   ② 执行/应答时必须真的把值**回传**（PluginFireReceiver / ConditionReceiver）
+        // 这里记下①做了没有、预告了哪些，省得来回猜。
+        AppLog.i("XSOCR-Plugin", "插件配置已保存: "
+                + (triggerMode ? "事件/触发器模式" : "动作模式")
+                + "，已预告变量: " + java.util.Arrays.toString(triggerMode
+                        ? PluginContract.MENU_VARIABLES
+                        : PluginContract.ALL_VARIABLES));
 
         // 顺便申请更长的超时（部分宿主会读，MacroDroid 不读也无害）。
         // PP-OCR 也这么做了：requestTimeoutMS(intent, 120000)。

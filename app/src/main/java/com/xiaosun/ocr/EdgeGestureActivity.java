@@ -14,6 +14,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -137,7 +138,10 @@ public class EdgeGestureActivity extends AppCompatActivity {
         buildMainSwitch();
         buildPermissionCard();
         buildHandlesCard();
+        buildBurnInCard();
         buildHelpCard();
+        // 日志卡片放最后：正常用户不会注意到它，出问题时才往下找到
+        content.addView(LogCard.build(this), cardLp());
     }
 
     private void buildStatusCard() {
@@ -527,6 +531,147 @@ public class EdgeGestureActivity extends AppCompatActivity {
         g.setCornerRadius(dp(radiusDp));
         g.setStroke(dp(1), stroke);
         return g;
+    }
+
+    // ============================================================
+    //  防烧屏
+    // ============================================================
+
+    private void buildBurnInCard() {
+        LinearLayout card = card();
+        card.addView(label("防烧屏"), wide());
+
+        TextView hint = new TextView(this);
+        hint.setTextSize(12);
+        hint.setTextColor(C_SUB);
+        hint.setLineSpacing(0f, 1.3f);
+        hint.setText("手柄是常驻的悬浮条，位置常年不动，OLED 屏会顺着它的形状"
+                + "慢慢留下残影。开启后手柄会隔一段时间在垂直方向轻微挪动几像素 —— "
+                + "肉眼几乎看不出，但发光像素错开了，残影就不容易堆积。"
+                + "\n只上下挪、不左右挪，所以手柄始终贴着屏幕边缘。");
+        LinearLayout.LayoutParams hl = wide();
+        hl.topMargin = dp(6);
+        card.addView(hint, hl);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        TextView t = new TextView(this);
+        t.setText("防止烧屏漂移");
+        t.setTextSize(14.5f);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+
+        TextView sub = new TextView(this);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(C_HINT);
+        col.addView(sub);
+
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        final Switch sw = new Switch(this);
+        sw.setChecked(EdgeGesturePrefs.isBurnInEnabled(this));
+        sub.setText(sw.isChecked() ? "已开启 · 位置会缓慢浮动" : "已关闭 · 位置固定不动");
+        sw.setOnCheckedChangeListener((b, checked) -> {
+            EdgeGesturePrefs.setBurnInEnabled(this, checked);
+            // 让服务重新排一次漂移任务；关掉时服务会把手柄拨回原位
+            EdgeGestureService.reload(this);
+            content.postDelayed(this::rebuild, 200);
+        });
+        row.addView(sw);
+
+        card.addView(row, wide());
+
+        int range = EdgeGesturePrefs.getBurnInRangeDp(this);
+        addSlider(card, "漂移幅度", range, 0, 30, " dp", v -> {
+            EdgeGesturePrefs.setBurnInRangeDp(this, v);
+            // 不用立刻 reload：下一次漂移任务会读到新值；
+            // 但设成 0 等于「不漂」，得让服务把手柄拨回去。
+            if (v == 0) EdgeGestureService.reload(this);
+        });
+
+        addSlider(card, "漂移间隔", EdgeGesturePrefs.getBurnInIntervalSec(this),
+                15, 300, " 秒", v -> EdgeGesturePrefs.setBurnInIntervalSec(this, v));
+
+        TextView tip = new TextView(this);
+        tip.setTextSize(11.5f);
+        tip.setTextColor(C_HINT);
+        tip.setLineSpacing(0f, 1.35f);
+        tip.setText("幅度越大越保险，越小越不显眼。幅度 0 = 不漂移。"
+                + "\n间隔指的是「每隔多久换一次位置」，不需要太频繁。");
+        LinearLayout.LayoutParams tl = wide();
+        tl.topMargin = dp(10);
+        card.addView(tip, tl);
+
+        content.addView(card, cardLp());
+    }
+
+    // ============================================================
+    //  控件工具
+    // ============================================================
+
+    private interface OnIntValue {
+        void on(int v);
+    }
+
+    /**
+     * 一行「标题 + 数值 + 滑杆」。
+     *
+     * 注意 minSdk 是 24，SeekBar.setMin() 要 API 26，
+     * 所以用「0..(max-min) 的内部进度 + min 偏移」的老办法。
+     */
+    private void addSlider(LinearLayout parent, String name, int value,
+                           int min, int max, String unit, OnIntValue onChange) {
+        if (max <= min) max = min + 1;
+        final int lo = min, span = max - min;
+
+        parent.addView(label(name), topMargin(16));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        final TextView val = new TextView(this);
+        val.setText(value + unit);
+        val.setTextSize(13.5f);
+        val.setTextColor(C_BRAND);
+        val.setTypeface(null, android.graphics.Typeface.BOLD);
+        val.setGravity(Gravity.END);
+        row.addView(val, new LinearLayout.LayoutParams(dp(64),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        SeekBar sb = new SeekBar(this);
+        int clamped = Math.max(min, Math.min(max, value));
+        sb.setMax(span);
+        sb.setProgress(clamped - lo);
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int v = lo + progress;
+                val.setText(v + unit);
+                if (fromUser) onChange.on(v);
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {
+                onChange.on(lo + bar.getProgress());   // 松手再补一次，确保落盘
+            }
+        });
+
+        row.addView(sb, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        parent.addView(row, wide());
+    }
+
+    private LinearLayout.LayoutParams topMargin(int dpValue) {
+        LinearLayout.LayoutParams lp = wide();
+        lp.topMargin = dp(dpValue);
+        return lp;
     }
 
     private LinearLayout.LayoutParams wide() {

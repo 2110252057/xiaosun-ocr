@@ -108,7 +108,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
+        AppLog.install(this);
         reloadItems();
 
         LinearLayout root = new LinearLayout(this);
@@ -442,6 +442,12 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
      * 现在四个操作收进长按菜单，格子里只留「看一眼就知道是什么」的信息。
      */
     private View buildItemCell(final int index) {
+        // 网格与数据源之间隔着一次 rebuild()，理论上不会错位；
+        // 但真错位了只该少画一格，不该闪退。
+        if (index < 0 || index >= items.size()) {
+            AppLog.w("XsOcrMenu", "菜单项下标越界，跳过该格: " + index + "/" + items.size());
+            return new View(this);
+        }
         final EdgeGesturePrefs.MenuItem it = items.get(index);
         LinearLayout cell = new LinearLayout(this);
         cell.setOrientation(LinearLayout.VERTICAL);
@@ -529,6 +535,10 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
     /** 长按菜单项弹出的操作表（上移 / 下移 / 编辑 / 删除）。 */
     private void showItemMenu(final int index) {
+        if (index < 0 || index >= items.size()) {
+            AppLog.w("XsOcrMenu", "长按菜单项下标越界: " + index + "/" + items.size());
+            return;
+        }
         final EdgeGesturePrefs.MenuItem it = items.get(index);
         final String[] ops = {"上移", "下移", "编辑内容", "删除"};
         new AlertDialog.Builder(this)
@@ -856,8 +866,16 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
     // ============================================================
 
     private void reloadItems() {
-        items.clear();
-        items.addAll(EdgeGesturePrefs.getMenuItems(this));
+        // 这里的解析结果直接决定菜单长什么样，一旦遇到脏数据
+        // （手改过的配置、旧版本遗留格式）不能让整个配置页打不开 ——
+        // 页面都进不去的话，用户连「改回来」的机会都没有。
+        try {
+            items.clear();
+            items.addAll(EdgeGesturePrefs.getMenuItems(this));
+        } catch (Throwable t) {
+            AppLog.e("XsOcrMenu", "读取菜单配置失败，按空菜单处理", t);
+            items.clear();
+        }
     }
 
     private void persist() {
@@ -1054,10 +1072,48 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
             super(EdgeGestureMenuActivity.this);
         }
 
+        /** 菜单项为空时的提示 —— 空菜单是正常状态，说明一下比留白强。 */
+        private void drawEmptyHint(Canvas cv) {
+            try {
+                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                p.setColor(0xFF9CA3AF);
+                p.setTextSize(dp(12));
+                p.setTextAlign(Paint.Align.CENTER);
+                String s = "菜单还是空的，先在下面「菜单项」里添加";
+                cv.drawText(s, getWidth() / 2f, getHeight() / 2f, p);
+            } catch (Throwable ignored) {
+            }
+        }
+
         @Override
         protected void onDraw(Canvas cv) {
+            // 预览是「边拖滑块边重绘」的视图，频率很高。
+            // 它只是配置页里的一张示意图 —— 画不出来只该是「图没了」，
+            // 绝不能把整个设置页带崩（onDraw 抛异常会一路冒到
+            // ViewRootImpl，直接杀进程）。
+            try {
+                onDrawInner(cv);
+            } catch (Throwable t) {
+                AppLog.e("XsOcrMenu", "预览绘制异常（已跳过本帧） 项数=" + items.size(), t);
+            }
+        }
+
+        private void onDrawInner(Canvas cv) {
             Context c = EdgeGestureMenuActivity.this;
-            int n = Math.max(1, items.size());
+
+            // ★【崩溃修复】这里原来写的是 Math.max(1, items.size())：
+            //   意图大概是「空菜单时也画点东西」，但那样会把 n 抬成 1，
+            //   而后面的 items.get(i) 就会在 items 为空时越界：
+            //       IndexOutOfBoundsException: Index 0 out of bounds for length 0
+            //   菜单项为空是**完全正常的初始状态**（新装用户、或刚删完
+            //   最后一项），而进这一页必然触发预览绘制 —— 于是必崩。
+            //   正确做法：用真实项数，空的时候画一句提示就够了。
+            int n = items.size();
+            if (n == 0) {
+                drawEmptyHint(cv);
+                return;
+            }
+
             float iconPx = dp(EdgeGesturePrefs.getMenuIconDp(c));
             if (iconPx <= 0f) return;
 
@@ -1149,6 +1205,10 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 // 文字标签：字号与间距都按预览的缩放比缩过，
                 // 这样调「文字大小 / 文字间距」能当场看到效果。
                 if (EdgeGesturePrefs.isMenuShowText(c)) {
+                    // 双保险：n 现在取自 items.size()，正常不会越界；
+                    // 但重绘可能发生在「改项」的中间态，多一次长度检查
+                    // 的代价远小于再崩一次。
+                    if (i >= items.size()) continue;
                     String txt = items.get(i).text;
                     if (txt != null && txt.length() > 0) {
                         float tx = dp(EdgeGesturePrefs.getMenuTextDp(c)) * k;

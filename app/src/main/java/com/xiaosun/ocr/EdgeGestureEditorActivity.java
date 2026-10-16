@@ -99,6 +99,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AppLog.install(this);
 
         handleId = getIntent() == null
                 ? -1 : getIntent().getIntExtra(EXTRA_HANDLE_ID, -1);
@@ -571,6 +572,31 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         parent.addView(note("手势导航下，系统是从屏幕边缘往内判定「返回」的，"
                 + "优先级比应用窗口还高 —— 手柄贴着边缘时，手指刚碰上去就被系统"
                 + "当成返回吃掉了，表现为「条子在那儿但按不动」。"), topMargin(2));
+
+        // ---- 平台能力提示：低于 Android 10 的机器根本没有这个 API ----
+        //
+        // setSystemGestureExclusionRects 是 API 29（Android 10）才加入的。
+        // 在 Android 9 及更早的机型上，**没有任何原生手段**能让应用
+        // 从系统手里抢回边缘手势 —— 这不是配置问题，怎么调都没用。
+        // 用户在不同手机上测试时最容易踩到这个坑（本机是 Android 17，
+        // 一切正常；换到旧机器上就「屏蔽失效」），所以必须写在界面上，
+        // 而不是等他来反馈。
+        if (Build.VERSION.SDK_INT < 29) {
+            TextView warn = new TextView(this);
+            warn.setTextSize(11.5f);
+            warn.setTextColor(0xFFB45309);   // 琥珀色，与「警告」语义一致
+            warn.setLineSpacing(0f, 1.35f);
+            warn.setText("⚠ 当前系统 Android " + Build.VERSION.RELEASE
+                    + "（API " + Build.VERSION.SDK_INT + "），低于 Android 10。\n"
+                    + "该版本没有提供「屏蔽系统手势」的平台接口，本开关在本机不会生效 —— "
+                    + "这是系统限制，不是配置错误。\n"
+                    + "临时办法：把手柄挪到屏幕偏中间的位置（避开系统边缘返回区），"
+                    + "或改用「三键导航」。");
+            LinearLayout.LayoutParams wl = wide();
+            wl.topMargin = dp(6);
+            parent.addView(warn, wl);
+        }
+
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);

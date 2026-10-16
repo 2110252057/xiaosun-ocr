@@ -398,6 +398,29 @@
                 android:value="Edge Swipe Gesture Trigger" />
         </service>
 
+        <!--
+          日志文件的分享通道。
+
+          AppLog 把日志写在 Android/data/com.xiaosun.ocr/files/logs/ 下，
+          这是应用私有外部目录，别的应用直接读不到。要让微信/QQ/邮件
+          收得到，必须包一层 FileProvider 给出 content:// URI
+          （Android 7.0 起传 file:// 会抛 FileUriExposedException）。
+
+          authority 必须与 AppLog.AUTHORITY 一字不差：
+              com.xiaosun.ocr.fileprovider
+          exported=false + grantUriPermissions=true 是标准组合：
+          不导出给所有人，只在分享那一刻把单个文件的读权限临时授出去。
+          可分享的路径白名单见 res/xml/file_paths.xml（只开了 logs/ 目录）。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.xiaosun.ocr.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 </application>
 
 </manifest>

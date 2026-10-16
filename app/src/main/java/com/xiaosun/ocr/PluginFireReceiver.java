@@ -104,6 +104,27 @@ public class PluginFireReceiver extends BroadcastReceiver {
         if (intent == null) return;
         String action = intent.getAction();
         if (!PluginContract.ACTION_FIRE_SETTING.equals(action)) return;
+        // 插件广播到达时，应用进程可能是刚被拉起来的 —— 幂等安装，晚了就没日志。
+        try {
+            AppLog.install(context);
+        } catch (Throwable ignored) {
+        }
+        // ---- 记下宿主这次给的关键信息 ----
+        // 排查「变量回不到某个宿主」先看这一条：
+        //   是不是有序广播？有没有回调地址（COMPLETION_INTENT）？
+        //   宿主声明了哪些能力位？
+        // 能力位含义（TaskerPlugin）：
+        //   2=设置型回传变量 4=条件型回传变量 8=执行时变量替换
+        //   16=相关变量预告 32=同步执行 64=REQUEST_QUERY 数据透传
+        try {
+            Object caps = intent.getExtras() == null
+                    ? null : intent.getExtras().get(PluginContract.EXTRA_HOST_CAPABILITIES);
+            AppLog.i(TAG, "插件执行入口: 有序广播=" + isOrderedBroadcast()
+                    + " 有回调地址=" + PluginContract.hasCompletionIntent(intent)
+                    + " 宿主能力位=" + caps);
+        } catch (Throwable t) {
+            AppLog.w(TAG, "记录执行入口信息失败: " + t);
+        }
 
         // 取宿主传来的配置
         Bundle cfg = null;
@@ -256,9 +277,13 @@ public class PluginFireReceiver extends BroadcastReceiver {
                     if (extras == null) extras = new Bundle();
                     PluginContract.addVariableBundle(extras, vars);
                     pending.setResultExtras(extras);
-                    pending.setResultCode(resultCode == PluginContract.RESULT_CODE_OK
-                            ? android.app.Activity.RESULT_OK
-                            : android.app.Activity.RESULT_CANCELED);
+                    // 直接回插件协议的结果码（-1=OK / 2=FAILED / 3=PENDING）。
+                    // 原来把失败转成 Activity.RESULT_CANCELED(0) —— 那不是
+                    // 协议里的码，宿主可能当成「未知」处理。
+                    pending.setResultCode(resultCode);
+                    AppLog.i(TAG, "同步回传变量: " + vars.size() + " 个"
+                            + " 结果码=" + resultCode
+                            + " 宿主声明支持=" + hostClaimsVars);
                     if (orderedNow) {
                         Log.i(TAG, "已同步回传变量 " + vars.size()
                                 + " 个（宿主声明支持=" + hostClaimsVars + "，耗时 " + cost + "ms）");
@@ -541,9 +566,12 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
 
             vars.putString(PluginContract.VAR_TEXT, sb.toString());
             vars.putString(PluginContract.VAR_MATCH, matched ? "true" : "false");
-            // ★ 坐标用 putInt 写入（整数变量）
-            vars.putInt(PluginContract.VAR_X, matchX);
-            vars.putInt(PluginContract.VAR_Y, matchY);
+            // ★ 坐标也必须用**字符串**回传 —— 见 PluginContract.putIntAsString()。
+            //   原先用 putInt，Tasker 只认 String 类型的值，会把这两项丢掉，
+            //   表现为「文字变量能收到、坐标收不到」。MacroDroid 不挑类型，
+            //   所以问题只在 Tasker 上暴露。
+            PluginContract.putIntAsString(vars, PluginContract.VAR_X, matchX);
+            PluginContract.putIntAsString(vars, PluginContract.VAR_Y, matchY);
             vars.putString(PluginContract.VAR_ERROR, "");
             vars.putString(PluginContract.VAR_TIME, String.valueOf(System.currentTimeMillis() - t0));
             vars.putString(PluginContract.VAR_TIER, o.optString("tier", tier == null ? "" : tier));
@@ -577,9 +605,10 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
                     ctx.getSharedPreferences("xsocr_last", Context.MODE_PRIVATE);
             android.content.SharedPreferences.Editor e = sp.edit();
             for (String k : vars.keySet()) {
-                // ★ 不能直接用 getString()：坐标是 putInt 写入的，
-                //   对 Integer 调 getString 会抛 ClassCastException。
-                //   统一走 String.valueOf(Object)，两种类型都安全。
+                // 变量值现在统一是 String（回传宿主必须是字符串，
+                // 见 PluginContract.putIntAsString），但仍走
+                // String.valueOf(Object)：万一以后又混进别的类型，
+                // 这里不会抛 ClassCastException —— 存快照不值得为类型冒险。
                 e.putString(k, String.valueOf(vars.get(k)));
             }
             e.putLong("ts", System.currentTimeMillis());
@@ -815,9 +844,11 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
         vars.putString(PluginContract.VAR_ERROR, msg == null ? "unknown" : msg);
         vars.putString(PluginContract.VAR_TEXT, "");
         vars.putString(PluginContract.VAR_MATCH, "false");
-        // 坐标是整数变量，失败时给 -1
-        vars.putInt(PluginContract.VAR_X, -1);
-        vars.putInt(PluginContract.VAR_Y, -1);
+        // 失败时坐标给 "-1"。同样必须是字符串：Tasker 只认 String 类型的值。
+        // 这一条尤其重要 —— 失败路径本来就是为了让宏能判断，
+        // 变量再传不过去，宏侧就成了「什么都没收到」。
+        PluginContract.putIntAsString(vars, PluginContract.VAR_X, -1);
+        PluginContract.putIntAsString(vars, PluginContract.VAR_Y, -1);
     }
 
     /**

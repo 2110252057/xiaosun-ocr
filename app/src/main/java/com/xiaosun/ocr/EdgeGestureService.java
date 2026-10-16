@@ -15,6 +15,7 @@ import android.content.IntentFilter;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.graphics.Canvas;
+import android.graphics.Insets;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -23,12 +24,14 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.Toast;
 import com.xiaosun.ocr.EdgeGesturePrefs;
@@ -39,6 +42,7 @@ import com.xiaosun.ocr.R;
 import com.xiaosun.ocr.TaskerEventProtocol;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 public class EdgeGestureService
 extends Service {
@@ -75,6 +79,97 @@ extends Service {
             EdgeGestureService.this.ui.postDelayed((Runnable)this, 2500L);
         }
     };
+
+    // ============================================================
+    //  防烧屏：像素漂移
+    // ============================================================
+
+    /** 随机源。漂移幅度只有几个像素，用普通 Random 足够。 */
+    private final Random burninRandom = new Random();
+
+    private final Runnable burninTask = new Runnable(){
+
+        @Override
+        public void run() {
+            try {
+                EdgeGestureService.this.doBurninShift();
+            }
+            catch (Throwable t) {
+                Log.w((String)EdgeGestureService.TAG, (String)("\u9632\u70e7\u5c4f\u6f02\u79fb\u5f02\u5e38: " + t));
+            }
+            EdgeGestureService.this.scheduleBurnin();
+        }
+    };
+
+    /**
+     * 安排下一次漂移。任何一处「配置变了 / 手柄重建了」都走这里，
+     * 因此它是幂等的（先撤旧任务再排新的）。
+     *
+     * 若功能被关掉（或幅度为 0），顺手把已经漂出去的手柄拨回原位 ——
+     * 否则会停在「漂移后」的位置上，看起来像是位置错了。
+     */
+    private void scheduleBurnin() {
+        this.ui.removeCallbacks(this.burninTask);
+        if (!EdgeGesturePrefs.isEnabled((Context)this)) {
+            return;
+        }
+        if (!EdgeGesturePrefs.isBurnInEnabled((Context)this)
+                || EdgeGesturePrefs.getBurnInRangeDp((Context)this) <= 0) {
+            this.resetBurnin();
+            return;
+        }
+        long ms = (long)EdgeGesturePrefs.getBurnInIntervalSec((Context)this) * 1000L;
+        this.ui.postDelayed(this.burninTask, ms);
+    }
+
+    private void doBurninShift() {
+        if (!EdgeGesturePrefs.isEnabled((Context)this)) {
+            return;
+        }
+        if (!EdgeGesturePrefs.isBurnInEnabled((Context)this)) {
+            return;
+        }
+        int rangePx = this.dp(EdgeGesturePrefs.getBurnInRangeDp((Context)this));
+        if (rangePx <= 0) {
+            return;
+        }
+        // 息屏时手柄本来也不显示，没必要动（也就省掉了无谓的窗口事务）。
+        if (!this.screenOn()) {
+            return;
+        }
+        for (View v : this.views) {
+            if (!(v instanceof GestureView)) continue;
+            try {
+                ((GestureView)v).applyBurninShift(this.burninRandom, rangePx);
+            }
+            catch (Throwable t) {
+                Log.w((String)TAG, (String)("\u9632\u70e7\u5c4f\u6f02\u79fb\u5931\u8d25: " + t));
+            }
+        }
+    }
+
+    /** 把所有手柄拨回原位（基准位置）。 */
+    private void resetBurnin() {
+        for (View v : this.views) {
+            if (!(v instanceof GestureView)) continue;
+            try {
+                ((GestureView)v).resetBurninShift();
+            }
+            catch (Throwable throwable) {
+                // empty catch block
+            }
+        }
+    }
+
+    private boolean screenOn() {
+        try {
+            PowerManager pm = (PowerManager)this.getSystemService("power");
+            return pm == null || pm.isInteractive();
+        }
+        catch (Throwable t) {
+            return true;
+        }
+    }
 
     public static void start(Context c) {
         try {
@@ -123,6 +218,11 @@ extends Service {
 
     public void onCreate() {
         super.onCreate();
+        // 日志要在这里就装好：手柄相关的问题（加窗失败、崩溃）
+        // 全都发生在服务进程里，等用户去点界面就来不及了。
+        // install() 幂等，和 MainActivity 里重复调用没有副作用。
+        AppLog.install(this);
+        AppLog.i(TAG, "EdgeGestureService.onCreate 启动，sdk=" + Build.VERSION.SDK_INT);
         this.wm = (WindowManager)this.getSystemService("window");
         this.reloadReceiver = new BroadcastReceiver(){
 
@@ -168,6 +268,7 @@ extends Service {
         EdgeGesturePrefs.refreshRuntime((Context)this);
         this.ui.removeCallbacks(this.watchdogTask);
         this.ui.postDelayed(this.watchdogTask, 2500L);
+        this.scheduleBurnin();
         return 1;
     }
 
@@ -189,6 +290,7 @@ extends Service {
     public void onDestroy() {
         isRunning = false;
         this.ui.removeCallbacks(this.watchdogTask);
+        this.ui.removeCallbacks(this.burninTask);
         EdgeGesturePrefs.gsRunning = false;
         this.removeAllViews();
         if (this.reloadReceiver != null) {
@@ -235,6 +337,9 @@ extends Service {
             }
         }
         EdgeGesturePrefs.gsHandleCount = shown;
+        AppLog.i(TAG, "手柄重建完成: 显示 " + shown + " 个 / 配置 "
+                + handles.size() + " 个，总开关=" + EdgeGesturePrefs.isEnabled(this));
+        this.scheduleBurnin();
     }
 
     private WindowManager.LayoutParams baseParams(boolean leftEdge) {
@@ -244,6 +349,26 @@ extends Service {
         p.format = -3;
         p.gravity = (leftEdge ? 0x800003 : 0x800005) | 0x30;
         p.x = 0;
+        // 允许悬浮窗铺到刘海 / 挖孔 / 曲面屏的「短边」区域。
+        //
+        // 这一项是照着 MacroDroid 侧边栏抄的：它的
+        // DrawerOverlayHandleService 在 API 28+ 会对 LayoutParams 调用
+        //   LayoutParams.layoutInDisplayCutoutMode =
+        //       LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;      // 值为 1
+        // （反编译里是 Lgd5;->c(LayoutParams;I) 这个桥接方法，就是写这个字段。）
+        //
+        // 为什么必须设：不设时窗口会被系统按 display cutout 的 inset 从物理
+        // 边缘往里推一段，手柄表面看仍然贴边（因为绘制在窗口内），但窗口
+        // 本身离开屏幕真边缘之后，我们上报的手势排除区也跟着一起内缩，
+        // 落在系统手势热区之外 —— 表现就是「上报成功，系统照样侧滑返回」。
+        //
+        // 字段是 API 28 才有的，条件保护住即可；低版本根本走不到这一句，
+        // 不会有 NoSuchFieldError（常量会被编译期内联，字段访问只在
+        // SDK_INT >= 28 的分支里执行）。
+        if (Build.VERSION.SDK_INT >= 28) {
+            p.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
         return p;
     }
 
@@ -254,6 +379,10 @@ extends Service {
         int[] scr = this.screenSize();
         int maxY = Math.max(0, scr[1] - p.height);
         p.y = (int)((float)maxY * ((float)h.offsetPercent / 100.0f));
+        AppLog.i(TAG, "加手柄: " + h.name + " 宽=" + p.width + " 高=" + p.height
+                + " y=" + p.y + " 贴边=" + (h.isEdgeLeft() ? "左" : "右")
+                + " 屏蔽手势=" + h.blockGesture + " 类型=" + p.type
+                + " 屏幕=" + scr[0] + "x" + scr[1]);
         HandleView v = new HandleView(h, p);
         v.setLayoutParams((ViewGroup.LayoutParams)p);
         this.wm.addView((View)v, (ViewGroup.LayoutParams)p);
@@ -288,6 +417,8 @@ extends Service {
         if (handle == null) {
             return;
         }
+        AppLog.i(TAG, "触发手势: 手柄=" + handle.name + " 方向=" + (dir >= 0 ? dir : -1)
+                + " 事件=" + handle.event + " 震动=" + handle.haptic);
         EdgeGesturePrefs.recordGesture((Context)this, handle, dir, handle.event);
         if (handle.haptic) {
             EdgeGesturePrefs.buzz((Context)this, true);
@@ -443,18 +574,55 @@ extends Service {
         HandleView(EdgeGesturePrefs.Handle h, WindowManager.LayoutParams p) {
             super(h, p);
         }
-
         @Override
         protected boolean hitTest(float rawX, float rawY) {
             return true;
         }
 
+        /**
+         * 每次布局完成都重报一次手势排除区 —— MacroDroid 侧边栏用的就是这个时机。
+         *
+         * 反编译里它的做法很直接：{@code ExcludeGestureFrameLayout.onLayout()}
+         * 先 super，再用刚拿到的 (l,t,r,b) 造 Rect 交给
+         * {@code ViewCompat.setSystemGestureExclusionRects()}。整个类就干这一件事，
+         * 它被直接当作手柄窗口的根视图。
+         *
+         * 为什么非要挂在 onLayout：排除区是「窗口本地坐标 → 由框架换算成屏幕坐标」，
+         * 因此只要窗口的**位置或尺寸**变了，之前那次上报的换算基准就过期了。
+         * 改 y（拖动、防烧屏漂移）、切边、改宽高、系统栏/旋转导致重新布局，
+         * 全都会走到这里；只在 onDraw 里报，纯移动窗口时不一定会有重绘帧，
+         * 就会停留在旧的换算结果上。
+         *
+         * 与 {@link #syncGestureExclusion()} 里的 equals 去重配合，
+         * 布局没实质变化时不会重复打日志，也不会反复走系统调用。
+         */
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            super.onLayout(changed, l, t, r, b);
+            try {
+                this.syncGestureExclusion();
+            }
+            catch (Throwable th) {
+                AppLog.w(EdgeGestureService.TAG, "布局后重报手势排除区失败: " + th);
+            }
+        }
+
+
         protected void onDraw(Canvas c) {
             super.onDraw(c);
-            if (this.menuOpen) {
-                this.drawMenu(c);
-            } else {
-                this.drawBar(c, this.handle, 0.0f, this.getHeight(), this.handle.isEdgeLeft(), this.flash);
+            // onDraw 里抛异常会一路冒到 ViewRootImpl，直接崩掉进程 ——
+            // 「点菜单闪退」最典型的成因就在这里（第三方图标 Drawable、
+            // 异常尺寸、字体度量等都可能抛）。所以整段绘制必须有兜底：
+            // 画不出来只是这一帧难看，绝不能把应用带走。
+            try {
+                if (this.menuOpen) {
+                    this.drawMenu(c);
+                } else {
+                    this.drawBar(c, this.handle, 0.0f, this.getHeight(), this.handle.isEdgeLeft(), this.flash);
+                }
+            } catch (Throwable t) {
+                AppLog.e(EdgeGestureService.TAG, "悬浮窗绘制异常（已跳过本帧）: menuOpen="
+                        + this.menuOpen + " 尺寸=" + this.getWidth() + "x" + this.getHeight(), t);
             }
             this.syncGestureExclusion();
         }
@@ -463,6 +631,9 @@ extends Service {
         protected List<Rect> buildExclusionRects() {
             ArrayList<Rect> out = new ArrayList<Rect>(1);
             if (!this.handle.blockGesture) {
+                // 该手柄没开「屏蔽系统手势」，属于配置项，不是故障。
+                // 报「屏蔽没生效」时先看这里 —— 很可能是开关没开。
+                AppLog.w(EdgeGestureService.TAG, "该手柄未开启屏蔽系统手势: " + this.handle.name);
                 return out;
             }
             out.add(new Rect(0, 0, this.getWidth(), this.getHeight()));
@@ -489,6 +660,9 @@ extends Service {
             this.params.gravity = (this.handle.isEdgeLeft() ? 0x800003 : 0x800005) | 0x30;
             this.params.x = 0;
             this.params.y = ny;
+            // 用户手动拖过之后，基准就是拖动结果；
+            // 否则下一次漂移会把窗口拉回「拖动前」的旧基准附近。
+            this.burninBaseY = ny;
             this.handle.offsetPercent = maxY == 0 ? 0 : Math.round((float)ny * 100.0f / (float)maxY);
             try {
                 EdgeGestureService.this.wm.updateViewLayout((View)this, (ViewGroup.LayoutParams)this.params);
@@ -559,6 +733,97 @@ extends Service {
         private int menuSavedGravity;
         private int menuSavedX;
         private int menuSavedY;
+        /**
+         * 防烧屏漂移的**基准窗口 y**（未漂移时应处的位置，px）。
+         *
+         * 为什么单独存一个基准，而不用 params.y：
+         *   params.y 是「当前显示位置」，漂移会把它改掉；
+         *   而 {@link #resetBurninShift()} 和下次漂移都需要知道
+         *   「回到哪儿 / 从哪儿算偏移」，所以基准必须另存。
+         *   Integer.MIN_VALUE = 还没定过基准，首次漂移时再取。
+         *
+         * 用 protected 而非 private：{@link HandleView} 是它的**兄弟**内部类
+         * （不是子类），兄弟持有的字段在 Java 里不算「继承成员」，
+         * private 会导致 `this.burninBaseY` 报 has private access。
+         */
+        protected int burninBaseY = Integer.MIN_VALUE;
+
+        /**
+         * 手指此刻是否正按在这个手柄上。
+         *
+         * 注意不能用 activePointerId 代替：那个字段只在 ACTION_DOWN 时被赋值，
+         * 抬手时并不会复位成 -1，拿它判断会变成「一旦碰过就永远算按着」，
+         * 漂移从此再不执行。
+         */
+        private boolean touching;
+
+        /** 「低版本无法屏蔽系统手势」只提示一次，免得刷屏。 */
+        private boolean lowApiLogged;
+
+        /** drawMenu 是每帧调用的，形状日志只记头两帧。 */
+        private int menuDrawLogged;
+        /**
+         * 触摸类日志（按下 / 被取消）最多记这么多条。
+         *
+         * 这两条日志是给「屏蔽系统手势到底有没有用」做判据的，
+         * 平时会跟着每一次触摸刷 —— 限个总量，长时间用也不至于把
+         * 512KB 的日志轮转掉、把别的线索顶出去。
+         */
+        private int touchLogged;
+
+        /** 把矩形列表拼成可读文本，给日志用。 */
+        private String rectsToString(List<Rect> list) {
+            StringBuilder sb = new StringBuilder();
+            for (Rect r : list) {
+                if (sb.length() > 0) sb.append(' ');
+                sb.append('[').append(r.left).append(',').append(r.top)
+                        .append(',').append(r.right).append(',').append(r.bottom).append(']');
+            }
+            return sb.toString();
+        }
+
+        /**
+         * 本窗口在屏幕上的实际矩形 —— 排查「排除区坐标对不对」用。
+         *
+         * 上报的矩形是**窗口本地坐标**（[0,0,宽,高]），框架会自动换算到
+         * 屏幕坐标再交给系统，所以系统眼里的生效范围 = 窗口屏幕位置 + 上报矩形。
+         * 这条日志把窗口位置也记下来，两边一拼就知道那块区域到底盖在哪。
+         */
+        private String windowRectOnScreen() {
+            try {
+                int[] loc = new int[2];
+                this.getLocationOnScreen(loc);
+                return "[" + loc[0] + "," + loc[1] + " "
+                        + this.getWidth() + "x" + this.getHeight() + "]"
+                        + " 已布局=" + this.isLaidOut()
+                        + " 已附着=" + this.isAttachedToWindow();
+            }
+            catch (Throwable t) {
+                return "(取窗口位置失败:" + t + ")";
+            }
+        }
+
+        /**
+         * 系统手势预留区：左右边缘各有这么宽的一段是「系统独占」的。
+         *
+         * 排查「屏蔽了却没效果」时看这个：手柄如果比它还窄，多出来的部分
+         * 本来就不受系统手势影响；真要屏蔽，得整块盖住这段边缘区才有效。
+         * 悬浮窗常常取不到（返回 0 或抛异常），取不到就记 unknown，不影响功能。
+         */
+        private String systemGestureInsetsDesc() {
+            try {
+                WindowInsets wi = this.getRootWindowInsets();
+                if (wi == null) {
+                    return "unknown(insets=null)";
+                }
+                Insets si = wi.getSystemGestureInsets();
+                return "left=" + si.left + " right=" + si.right
+                        + " top=" + si.top + " bottom=" + si.bottom;
+            }
+            catch (Throwable t) {
+                return "unknown(" + t + ")";
+            }
+        }
 
         GestureView(EdgeGesturePrefs.Handle h, WindowManager.LayoutParams p) {
             super((Context)EdgeGestureService.this);
@@ -610,6 +875,74 @@ extends Service {
             return this.params.y;
         }
 
+        /**
+         * 防烧屏：在垂直方向随机挪一点点，并立刻应用到窗口。
+         *
+         * 只动 y 不动 x —— 手柄要始终贴着屏幕边缘，横向移动会破坏这个语义。
+         * 偏移不会写回 {@code handle.offsetPercent}，所以它是临时的：
+         * 重启 / 关掉开关就回到用户设定好的位置。
+         *
+         * @param rangePx 漂移半径（px），实际落在 [-rangePx, +rangePx] 内
+         */
+        protected void applyBurninShift(Random rnd, int rangePx) {
+            if (rangePx <= 0) {
+                return;
+            }
+            // 菜单展开时窗口是全屏的（params 已被改写），拖动时也不该插手
+            if (this.menuOpen || this.dragMode) {
+                return;
+            }
+            // 手指正按在手柄上时不动 —— 判定虽然用的是 rawX/rawY（屏幕坐标，
+            // 不受窗口平移影响），但按住期间平白多一次窗口事务没有意义，
+            // 也免得「手指还没抬，条子先跑了」的观感。
+            if (this.touching) {
+                return;
+            }
+            if (!this.isAttachedToWindow()) {
+                return;
+            }
+            if (this.burninBaseY == Integer.MIN_VALUE) {
+                this.burninBaseY = this.params.y;
+            }
+            int[] scr = EdgeGestureService.this.screenSize();
+            int maxY = Math.max(0, scr[1] - this.params.height);
+            int dy = rnd.nextInt(rangePx * 2 + 1) - rangePx;
+            int ny = this.burninBaseY + dy;
+            if (ny < 0) {
+                ny = 0;
+            }
+            if (ny > maxY) {
+                ny = maxY;
+            }
+            if (ny == this.params.y) {
+                return;
+            }
+            this.params.y = ny;
+            try {
+                EdgeGestureService.this.wm.updateViewLayout((View)this, (ViewGroup.LayoutParams)this.params);
+            }
+            catch (Throwable t) {
+                Log.w((String)EdgeGestureService.TAG, (String)("\u9632\u70e7\u5c4f\u6f02\u79fb\u5931\u8d25: " + t));
+            }
+        }
+
+        /** 拨回基准位置（关掉防烧屏 / 幅度设成 0 时调用）。 */
+        protected void resetBurninShift() {
+            if (this.burninBaseY == Integer.MIN_VALUE) {
+                return;
+            }
+            if (this.params.y == this.burninBaseY) {
+                return;
+            }
+            this.params.y = this.burninBaseY;
+            try {
+                EdgeGestureService.this.wm.updateViewLayout((View)this, (ViewGroup.LayoutParams)this.params);
+            }
+            catch (Throwable throwable) {
+                // empty catch block
+            }
+        }
+
         protected abstract boolean hitTest(float var1, float var2);
 
         protected abstract void applyDrag(float var1, float var2);
@@ -618,8 +951,41 @@ extends Service {
 
         protected abstract List<Rect> buildExclusionRects();
 
+        /**
+         * 上一次上报时的**窗口几何指纹**。
+         *
+         * 光比较矩形内容是不够的：手柄窗口的矩形永远是 {@code (0,0,w,h)}，
+         * 改 y 拖动一下、防烧屏漂移一下，矩形一个字符都没变，但排除区在屏幕
+         * 上的实际位置已经整块平移了 —— 此时框架需要重新做一次
+         * 「窗口本地坐标 → 屏幕坐标」换算。只按矩形去重会把这种必要的重报
+         * 连同日志一起吞掉，现象就是「位置明明变了，排除区还留在老地方」。
+         *
+         * 所以指纹里必须带上窗口的 x/y/宽/高/gravity 和贴哪一边，
+         * 以及当前是否已布局（未布局时算出来的位置不作数，等 onLayout 再来）。
+         */
+        private String exclusionKey = "";
+
+        /** 组装当前窗口几何指纹；取不到关键信息时返回空串表示「这次不作数」。 */
+        private String exclusionKeyNow() {
+            if (!this.isAttachedToWindow()) {
+                return "";
+            }
+            return this.params.width + "x" + this.params.height
+                    + "@" + this.params.x + "," + this.params.y
+                    + "/g" + this.params.gravity
+                    + "/e" + (this.handle.isEdgeLeft() ? "L" : "R");
+        }
+
         protected void syncGestureExclusion() {
             if (Build.VERSION.SDK_INT < 29) {
+                // setSystemGestureExclusionRects 是 API 29 才有的平台能力。
+                // 低于 29 的机器（Android 9 及以下）没有任何原生手段屏蔽
+                // 系统侧滑返回 —— 用户报「屏蔽没生效」时先看这一条。
+                if (!lowApiLogged) {
+                    lowApiLogged = true;
+                    AppLog.w(EdgeGestureService.TAG, "系统手势屏蔽不可用: sdk="
+                            + Build.VERSION.SDK_INT + " < 29（该机型无平台 API）");
+                }
                 return;
             }
             if (this.menuOpen) {
@@ -629,18 +995,42 @@ extends Service {
             if (want == null) {
                 want = new ArrayList<Rect>(0);
             }
-            if (want.equals(this.reportedRects)) {
+            String key = this.exclusionKeyNow();
+            // 矩形没变 **且** 窗口几何没变，才算真的不用重报。
+            if (want.equals(this.reportedRects) && key.equals(this.exclusionKey)) {
                 return;
             }
             this.reportedRects.clear();
             for (Rect r : want) {
                 this.reportedRects.add(new Rect(r));
             }
+            this.exclusionKey = key;
             try {
                 this.setSystemGestureExclusionRects(want);
+                // ---- 诊断：这次上报系统认不认 ----
+                // 只记「调过了」说明不了问题，下面三项才是判据：
+                //   回读   —— View 层有没有把值静默丢掉
+                //   窗口   —— 换算到屏幕上是哪一块（系统按屏幕坐标判定）
+                //   手势区 —— 系统在边缘独占多宽，手柄有没有真的压上去
+                String back;
+                try {
+                    List<Rect> got = this.getSystemGestureExclusionRects();
+                    back = " 回读=" + (got == null ? "null" : rectsToString(got));
+                }
+                catch (Throwable t2) {
+                    back = " 回读失败:" + t2;
+                }
+                AppLog.i(EdgeGestureService.TAG, "手势排除区已上报: " + want.size()
+                        + " 块 " + rectsToString(want)
+                        + " (sdk=" + Build.VERSION.SDK_INT + ")"
+                        + " 窗口=" + this.windowRectOnScreen()
+                        + " 手势区=" + this.systemGestureInsetsDesc()
+                        + back);
             }
             catch (Throwable t) {
                 Log.w((String)EdgeGestureService.TAG, (String)("\u624b\u52bf\u6392\u9664\u4e0a\u62a5\u5931\u8d25: " + t));
+                AppLog.e(EdgeGestureService.TAG, "手势排除区上报失败 (sdk="
+                        + Build.VERSION.SDK_INT + ")", t);
             }
         }
 
@@ -668,7 +1058,46 @@ extends Service {
             }
         }
 
+        /**
+         * 弹出滑动菜单。
+         *
+         * 外面套一层兜底：菜单这摊子牵扯配置解析、图标加载（第三方 App 的
+         * Drawable 什么样都有）、窗口改全屏、实时布局，任何一环在别的机型上
+         * 出意外，都不该让整个应用直接退出。真出事了就有记录地退开，
+         * 用户看到的是「这次没弹出来」，而不是「应用不见了」。
+         */
         protected boolean tryOpenMenu(int dir, float rawX, float rawY) {
+            try {
+                return this.tryOpenMenuInner(dir, rawX, rawY);
+            } catch (Throwable t) {
+                AppLog.e(EdgeGestureService.TAG, "菜单展开异常，已安全退出本次展开", t);
+                this.menuOpen = false;
+                this.menuHover = -1;
+                try {
+                    this.menuItems = new ArrayList<EdgeGesturePrefs.MenuItem>();
+                    this.menuIcons.clear();
+                    this.menuRects.clear();
+                    int w = this.menuSavedWidth > 0
+                            ? this.menuSavedWidth : Math.max(1, this.dp(this.handle.width));
+                    int h = this.menuSavedHeight > 0
+                            ? this.menuSavedHeight : Math.max(1, this.dp(this.handle.height));
+                    this.params.width = w;
+                    this.params.height = h;
+                    this.params.gravity = this.menuSavedGravity != 0
+                            ? this.menuSavedGravity
+                            : ((this.handle.isEdgeLeft() ? 0x800003 : 0x800005) | 0x30);
+                    this.params.x = 0;
+                    this.params.y = this.menuSavedY;
+                    EdgeGestureService.this.wm.updateViewLayout((View)this, (ViewGroup.LayoutParams)this.params);
+                } catch (Throwable t2) {
+                    AppLog.e(EdgeGestureService.TAG, "菜单异常后恢复窗口失败", t2);
+                }
+                this.invalidate();
+                return false;
+            }
+        }
+
+        private boolean tryOpenMenuInner(int dir, float rawX, float rawY) {
             List<EdgeGesturePrefs.MenuItem> items = EdgeGesturePrefs.getMenuItems(this.getContext());
             if (items.isEmpty()) {
                 return false;
@@ -692,6 +1121,22 @@ extends Service {
             this.menuArcTextPx = this.menuTextPx;
             this.menuArcTextGapPx = this.menuTextGapPx;
             this.menuHitScale = (float)EdgeGesturePrefs.getMenuHitScale(this.getContext()) / 100.0f;
+            // ---- 菜单展开：把当时的配置与触发点全记下来 ----
+            // 这个功能在别的机型上闪退过，而这些参数（项数、图标数、
+            // 布局、命中倍率）就是复现的钥匙，出问题时必须一眼可见。
+            int iconNull = 0;
+            for (Drawable d : this.menuIcons) {
+                if (d == null) iconNull++;
+            }
+            AppLog.i(EdgeGestureService.TAG, "菜单展开请求: 方向=" + dir
+                    + " 项数=" + items.size() + " 无图标=" + iconNull
+                    + " 图标=" + (int)this.menuIconPx + "px 显示文字=" + this.menuShowText
+                    + " 布局=" + layout + " 每排=" + this.menuArcPerRing
+                    + " 每排覆盖=" + EdgeGesturePrefs.getMenuRowCounts(this.getContext()).length
+                    + " 命中倍率=" + this.menuHitScale
+                    + " 锚点=(" + (int)rawX + "," + (int)rawY + ")"
+                    + " 窗口原=" + this.menuSavedWidth + "x" + this.menuSavedHeight
+                    + " y=" + this.menuSavedY);
             this.menuAnchorRawX = rawX;
             this.menuAnchorRawY = rawY;
             this.menuArcFacing = (float)Math.toRadians((double)dir * 45.0 - 90.0);
@@ -710,6 +1155,7 @@ extends Service {
             }
             catch (Throwable t) {
                 Log.w((String)EdgeGestureService.TAG, (String)("\u83dc\u5355\u5c55\u5f00\u5931\u8d25: " + t));
+                AppLog.e(EdgeGestureService.TAG, "菜单展开失败（改全屏窗口被拒）", t);
                 this.params.width = this.menuSavedWidth;
                 this.params.height = this.menuSavedHeight;
                 this.params.gravity = this.menuSavedGravity;
@@ -722,6 +1168,7 @@ extends Service {
             this.menuHover = -1;
             this.clearGestureExclusion();
             this.invalidate();
+            AppLog.i(EdgeGestureService.TAG, "菜单已展开: 全屏 " + this.getWidth() + "x" + this.getHeight());
             return true;
         }
 
@@ -729,6 +1176,8 @@ extends Service {
             if (!this.menuOpen) {
                 return;
             }
+            AppLog.i(EdgeGestureService.TAG, "菜单收起: 悬停项=" + this.menuHover
+                    + " 项数=" + this.menuItems.size());
             this.menuOpen = false;
             this.menuLayoutW = -1;
             this.menuLayoutH = -1;
@@ -752,6 +1201,28 @@ extends Service {
             this.invalidate();
         }
 
+        /**
+         * 图标画不出来时的兜底：就地画文字。
+         *
+         * 和「本来就没配图标」的显示保持一致（取前两个字），
+         * 这样用户看到的是「这个按钮没图标」，而不是「少了一个按钮」。
+         */
+        private void drawMenuTextFallback(Canvas c, int i, float cx0, float cy0,
+                                          float iconPx, boolean on, Paint p) {
+            try {
+                if (i < 0 || i >= this.menuItems.size()) return;
+                String t = this.menuItems.get(i).text;
+                if (t == null || t.length() == 0) return;
+                String label = t.length() > 2 ? t.substring(0, 2) : t;
+                p.setColor(on ? -1 : (this.isLightColor(this.menuBgColor) ? -14540254 : -1));
+                p.setTextSize(iconPx * (label.length() > 1 ? 0.26f : 0.34f));
+                p.setTextAlign(Paint.Align.CENTER);
+                float cy = cy0 - (p.descent() + p.ascent()) / 2.0f;
+                c.drawText(label, cx0, cy, p);
+            } catch (Throwable ignored) {
+            }
+        }
+
         private void clearGestureExclusion() {
             if (Build.VERSION.SDK_INT < 29) {
                 return;
@@ -762,6 +1233,7 @@ extends Service {
             this.reportedRects.clear();
             try {
                 this.setSystemGestureExclusionRects(new ArrayList());
+                AppLog.i(EdgeGestureService.TAG, "手势排除区已清空（菜单展开时不挡系统手势）");
             }
             catch (Throwable throwable) {
                 // empty catch block
@@ -816,6 +1288,8 @@ extends Service {
                 h = scr[1];
             }
             if (w <= 0 || h <= 0) {
+                AppLog.w(EdgeGestureService.TAG, "菜单布局放弃: 尺寸非法 w=" + w + " h=" + h
+                        + " 窗口=" + this.getWidth() + "x" + this.getHeight());
                 return;
             }
             this.menuLayoutW = w;
@@ -829,6 +1303,12 @@ extends Service {
             float cell = this.menuIconPx + textH;
             float pad = this.dp(12.0f);
             this.layoutMenuLine(w, h, cell, gap, pad, n);
+            AppLog.i(EdgeGestureService.TAG, "菜单布局: 画布=" + w + "x" + h
+                    + " 窗口=" + this.getWidth() + "x" + this.getHeight()
+                    + " 项数=" + n + " 格子=" + (int)cell + " 图标=" + (int)this.menuIconPx
+                    + " 文字高=" + (int)textH + " 间距=" + (int)gap
+                    + " 缩放后图标=" + (int)this.menuArcIconPx
+                    + " 圆心=(" + (int)this.menuCx + "," + (int)this.menuCy + ")");
             if (w != this.getWidth() || h != this.getHeight()) {
                 Log.d((String)EdgeGestureService.TAG, (String)("LAYOUT \u7528\u5c4f\u5e55\u5c3a\u5bf8\u515c\u5e95: " + w + "x" + h + " \u7a97\u53e3=" + this.getWidth() + "x" + this.getHeight() + " \u56fe\u6807=" + (int)this.menuArcIconPx));
             }
@@ -891,6 +1371,9 @@ extends Service {
             float envW = Math.max(1.0f, relMaxX - relMinX);
             float scale = Math.min(1.0f, Math.min(availW / envW, availH / (envH = Math.max(1.0f, relMaxY - relMinY))));
             if (Float.isNaN(scale) || scale <= 0.0f) {
+                AppLog.w(EdgeGestureService.TAG, "菜单缩放异常, 退化为兜底值: scale=" + scale
+                        + " 包络=" + envW + "x" + envH + " 可用=" + availW + "x" + availH
+                        + " cell=" + cell + " 图标=" + this.menuIconPx);
                 scale = 0.12f;
             }
             if (scale < 0.12f) {
@@ -929,6 +1412,17 @@ extends Service {
         }
 
         private int hitMenu(float rawX, float rawY) {
+            try {
+                return hitMenuInner(rawX, rawY);
+            } catch (Throwable t) {
+                // 命中判定出问题只该「点不中」，绝不该把应用打崩
+                AppLog.e(EdgeGestureService.TAG, "菜单命中判定异常 手指=("
+                        + (int)rawX + "," + (int)rawY + ")", t);
+                return -1;
+            }
+        }
+
+        private int hitMenuInner(float rawX, float rawY) {
             if (this.menuRects.size() != this.menuItems.size()) {
                 this.layoutMenuRects();
             }
@@ -967,7 +1461,18 @@ extends Service {
             float textGap;
             int n = this.menuItems.size();
             if (n == 0) {
+                AppLog.w(EdgeGestureService.TAG, "drawMenu 时菜单项为空（配置被清？）");
                 return;
+            }
+            // drawMenu 每帧都跑 —— 这里千万不能无脑记日志，否则一秒钟刷几百行，
+            // 有用的信息全被冲掉。只在首帧记两条形状数据（布局结果另有埋点），
+            // 真画崩了由下面的图标兜底去记异常。
+            if (this.menuDrawLogged < 2) {
+                this.menuDrawLogged++;
+                AppLog.i(EdgeGestureService.TAG, "菜单首帧: 项数=" + n
+                        + " 矩形数=" + this.menuRects.size()
+                        + " 图标数=" + this.menuIcons.size()
+                        + " 悬停=" + this.menuHover);
             }
             if (this.menuRects.size() != n) {
                 this.layoutMenuRects();
@@ -1009,8 +1514,18 @@ extends Service {
                     float side = iconPx * 0.62f;
                     float cx = cx0;
                     float cy = cy0;
-                    d.setBounds(Math.round(cx - side / 2.0f), Math.round(cy - side / 2.0f), Math.round(cx + side / 2.0f), Math.round(cy + side / 2.0f));
-                    d.draw(c);
+                    // 图标绘制兜底：第三方应用的 Drawable 五花八门，
+                    // 有的在 setBounds/draw 时会抛异常（自定义 Drawable、
+                    // 已失效的 RemoteViews 资源等）。一个图标画不出来
+                    // 不该让整个菜单——乃至整个悬浮窗——崩掉。
+                    try {
+                        d.setBounds(Math.round(cx - side / 2.0f), Math.round(cy - side / 2.0f), Math.round(cx + side / 2.0f), Math.round(cy + side / 2.0f));
+                        d.draw(c);
+                    } catch (Throwable dt) {
+                        AppLog.e(EdgeGestureService.TAG, "菜单图标绘制失败, 该项退化为文字: "
+                                + (i < this.menuItems.size() ? this.menuItems.get(i).source : "?"), dt);
+                        this.drawMenuTextFallback(c, i, cx0, cy0, iconPx, on, p);
+                    }
                 } else {
                     String t2 = this.menuItems.get((int)i).text;
                     if (t2 != null && t2.length() > 0) {
@@ -1042,6 +1557,15 @@ extends Service {
                 case 0: {
                     if (!this.hitTest(e.getX(), e.getY())) {
                         return false;
+                    }
+                    this.touching = true;
+                    // 记下手指落点与窗口位置：一眼看出落点到底在不在
+                    // 我们上报给系统的那块排除区里。
+                    if (this.touchLogged < 100) {
+                        this.touchLogged++;
+                        AppLog.i(EdgeGestureService.TAG, "手柄按下: Raw=("
+                                + (int)e.getRawX() + "," + (int)e.getRawY() + ")"
+                                + " 窗口=" + this.windowRectOnScreen());
                     }
                     this.downRawX = e.getRawX();
                     this.downRawY = e.getRawY();
@@ -1105,6 +1629,17 @@ extends Service {
                 }
                 case 1: 
                 case 3: {
+                    // ACTION_CANCEL(3) = 这批触摸被系统抢走了（多半是边缘返回手势）。
+                    // 「屏蔽开关开着却没效果」时，这条是最直接的判据：
+                    // 排除区真被系统接受的话，那一带的滑动会完整送进来，不会有 CANCEL。
+                    if (e.getActionMasked() == 3 && this.touchLogged < 100) {
+                        this.touchLogged++;
+                        AppLog.w(EdgeGestureService.TAG,
+                                "触摸被取消(ACTION_CANCEL)：这批手势被系统抢走了"
+                                + " 手指Raw=(" + (int)e.getRawX() + "," + (int)e.getRawY() + ")"
+                                + " 窗口=" + this.windowRectOnScreen());
+                    }
+                    this.touching = false;
                     EdgeGestureService.this.ui.removeCallbacks(this.longPress);
                     if (this.menuOpen) {
                         int pi;
@@ -1117,8 +1652,13 @@ extends Service {
                         if (up) {
                             if (idx >= 0 && idx < this.menuItems.size()) {
                                 EdgeGesturePrefs.MenuItem it = this.menuItems.get(idx);
+                                AppLog.i(EdgeGestureService.TAG, "菜单选中: 索引=" + idx
+                                        + " 文字=" + it.text + " 动作=" + it.action
+                                        + " 方向=" + dir);
                                 EdgeGesturePrefs.recordMenuChoice(idx, it.text, it.action);
                             } else {
+                                AppLog.i(EdgeGestureService.TAG, "菜单取消（抬手处没命中任何项）: 手指=("
+                                        + (int)e.getX() + "," + (int)e.getY() + ")");
                                 EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             }
                             this.closeMenu();

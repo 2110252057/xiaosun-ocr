@@ -429,11 +429,12 @@ public final class PluginContract {
     public static android.os.Bundle buildMenuVars() {
         android.os.Bundle vars = new android.os.Bundle();
         try {
-            // index 用 putInt：语意上它是数字。
-            // ⚠ 读取方别再调 getString()，会抛 ClassCastException，要读用 get()。
-            // 没配菜单时 menuIndex 恒为 -1，宏侧读到 -1 即表示
+            // ★ 用字符串回传，不能用 putInt —— 见 putIntAsString() 的注释：
+            //   Tasker 的变量协议只认 String / String[] / ArrayList<String>，
+            //   回 Integer 会被它丢弃，表现为「菜单索引传不过去」。
+            // 没配菜单时 menuIndex 恒为 -1，宏侧读到 "-1" 即表示
             // 「这次不是菜单选项触发的」。
-            vars.putInt(VAR_MENU_INDEX, EdgeGesturePrefs.menuIndex);
+            putIntAsString(vars, VAR_MENU_INDEX, EdgeGesturePrefs.menuIndex);
             String mtext = EdgeGesturePrefs.menuText;
             vars.putString(VAR_MENU_TEXT, mtext == null ? "" : mtext);
             String mact = EdgeGesturePrefs.menuAction;
@@ -522,16 +523,25 @@ public final class PluginContract {
     }
 
     /**
-     * 以「整数」形式回传的变量：坐标 X、坐标 Y。
+     * 关于「坐标 X / 坐标 Y」这两个变量（VAR_X / VAR_Y）。
      *
-     * 实现方式是在 Bundle 里用 putInt() 而不是 putString()。
-     * 宿主侧（MacroDroid 的 t6g.b）会用 toString() 统一转成字符串，
-     * 所以最终存进宏变量都是 "523" 这种文本；
-     * 但**类型正确的 Bundle 更规范**：Tasker 会据此区分数字/文本变量，
-     * 且避免下游再解析一次。
+     * ── 曾经的写法与它踩的坑 ─────────────────────────────
+     * 原先它们（以及菜单索引）是用 putInt() 写进 Bundle 的，
+     * 理由是「语意上它们是数字、更规范」。这个判断是错的：
      *
-     * 注意：读取这类 key 时不能调 Bundle.getString()，会抛 ClassCastException，
-     *      必须用 get() / getInt()。见 PluginFireReceiver.stashResult()。
+     *   Tasker 官方 TaskerPlugin.addVariableBundle 明确要求
+     *       Values must be String, String [] or ArrayList<String>
+     *   即宿主变量协议**只接受字符串**。回 Integer 时 Tasker 会
+     *   静默丢掉该项，于是「文字变量能到、坐标和索引到不了」。
+     *   MacroDroid 内部对值统一 toString()，所以一直没暴露问题。
+     *
+     * ── 现在的写法 ───────────────────────────────────────
+     * 一律用 {@link #putIntAsString} 回传字符串（"-1" / "523"）。
+     * 宏侧拿到的文本与之前完全一致，语义零变化。
+     *
+     * 内部快照（{@code stashResult} 存给 HTTP /last 接口用的那份）
+     * 仍是数字，因为它不经过宿主协议 —— 读取方式见
+     * PluginFireReceiver.stashResult()，那里对两种类型都安全。
      */
 
     /**
@@ -562,6 +572,59 @@ public final class PluginContract {
     }
 
     // ==================== 异步补结果的实现 ====================
+
+    /** 插件相关日志的 tag（与 PluginFireReceiver 一致，方便一起筛）。 */
+    private static final String LOG_TAG = "XSOCR-Plugin";
+
+    /**
+     * 从 Bundle 里安全取 Boolean。
+     *
+     * ★ 返回 null 而不是 false，这点很重要：
+     *   宿主「没给这个值」和「明确说要 false」是两回事，
+     *   上层要据此决定走 Service 还是走广播（见 signalFinish）。
+     */
+    private static Boolean boolExtra(android.os.Bundle b, String key) {
+        if (b == null) return null;
+        try {
+            Object o = b.get(key);
+            return (o instanceof Boolean) ? (Boolean) o : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 变量个数，只给日志用。 */
+    private static int sizeOf(android.os.Bundle b) {
+        return b == null ? 0 : b.size();
+    }
+
+    /**
+     * 把整数写进变量 Bundle —— **以字符串形式**。
+     *
+     * ★【为什么必须是 String，不能是 Integer】
+     *
+     *   Tasker 官方 TaskerPlugin.addVariableBundle 的 javadoc 写得很死：
+     *
+     *       Names must be valid Tasker local variable names.
+     *       Values must be String, String [] or ArrayList<String>
+     *
+     *   即 Tasker 的变量协议只接受 String / String[] / ArrayList<String>。
+     *   我们曾经用 putInt() 回传「菜单索引」与「命中坐标」，
+     *   Tasker 收到 Integer 会**直接丢掉该项**（同批里 putString 的照收），
+     *   现象就是「文字变量能到、索引和坐标到不了」。
+     *   MacroDroid 对每个值统一 toString()、不挑类型，
+     *   所以这个 bug 只在 Tasker 一侧暴露出来。
+     *
+     *   存成字符串后宏侧拿到的是 "3" 这种文本 —— 与之前的实际效果一致
+     *   （Tasker 本来就会把值当文本用），语义零变化。
+     *
+     * 注意：内部快照（stashResult / HTTP /last 接口）仍可用数字类型，
+     *      那些不经过宿主协议，见 PluginFireReceiver.stashResult()。
+     */
+    static void putIntAsString(android.os.Bundle vars, String key, int value) {
+        if (vars == null) return;
+        vars.putString(key, String.valueOf(value));
+    }
 
     /**
      * 从宿主给的 Intent 里取出「回调地址」。
@@ -617,34 +680,58 @@ public final class PluginContract {
                 completion.putExtra(EXTRA_VARIABLES_BUNDLE, variables);
             }
 
-            // 宿主可能指定用 Service 接收，并且可能要求前台服务
-            String pkg = fromHost.getStringExtra(EXTRA_CALL_SERVICE_PACKAGE);
-            String cls = fromHost.getStringExtra(EXTRA_CALL_SERVICE);
-            Boolean fg = null;
-            try {
-                Object o = fromHost.getExtras() == null
-                        ? null : fromHost.getExtras().get(EXTRA_CALL_SERVICE_FOREGROUND);
-                if (o instanceof Boolean) fg = (Boolean) o;
-            } catch (Throwable ignored) {
-            }
+            // ============ 「宿主用 Service 还是广播收结果」 ============
+            //
+            // ★ 这里曾经是本插件「变量能回 MacroDroid、回不了 Tasker」的根因。
+            //
+            //   Tasker 官方 TaskerPlugin.Setting.signalFinish 读的是
+            //   **解析后的 completionIntent**，不是原始的 fire intent：
+            //
+            //       completionIntent.putExtra(EXTRA_RESULT_CODE, resultCode);
+            //       if (vars != null) completionIntent.putExtra(EXTRA_VARIABLES_BUNDLE, vars);
+            //       String callServicePackage = (String) getExtraValueSafe(
+            //               completionIntent, EXTRA_CALL_SERVICE_PACKAGE, String.class, ...);
+            //       String callService = ...(completionIntent, EXTRA_CALL_SERVICE, ...);
+            //       Boolean foreground = ...(completionIntent, EXTRA_CALL_SERVICE_FOREGROUND, ...);
+            //       if (三者都非 null) { setComponent(...); startService/startForegroundService }
+            //       else               { sendBroadcast(completionIntent) }
+            //
+            //   原因是宿主用 Host.addCompletionIntent() 把这三个值放进
+            //   **completionIntent** 里，原始 fire intent 上根本没有。
+            //
+            //   我们原来从 fromHost 读 → 恒为 null → 一律 sendBroadcast。
+            //   MacroDroid 接受广播，所以一直没暴露；而 Tasker 是按 Service
+            //   收结果的，广播到不了它手里 → 变量全丢。
+            //
+            //   现在按官方做法从 completion 读；读不到再回退看一眼原始
+            //   intent —— 只加不减，已经能用的宿主一条都不动。
+            String pkg = completion.getStringExtra(EXTRA_CALL_SERVICE_PACKAGE);
+            String cls = completion.getStringExtra(EXTRA_CALL_SERVICE);
+            Boolean fg = boolExtra(completion.getExtras(), EXTRA_CALL_SERVICE_FOREGROUND);
+
+            if (pkg == null) pkg = fromHost.getStringExtra(EXTRA_CALL_SERVICE_PACKAGE);
+            if (cls == null) cls = fromHost.getStringExtra(EXTRA_CALL_SERVICE);
+            if (fg == null) fg = boolExtra(fromHost.getExtras(), EXTRA_CALL_SERVICE_FOREGROUND);
 
             if (pkg != null && cls != null) {
                 completion.setComponent(new android.content.ComponentName(pkg, cls));
-                if (Boolean.TRUE.equals(fg)) {
-                    if (android.os.Build.VERSION.SDK_INT
-                            >= android.os.Build.VERSION_CODES.O) {
-                        ctx.startForegroundService(completion);
-                    } else {
-                        ctx.startService(completion);
-                    }
+                boolean fgService = Boolean.TRUE.equals(fg)
+                        && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O;
+                if (fgService) {
+                    ctx.startForegroundService(completion);
                 } else {
                     ctx.startService(completion);
                 }
+                AppLog.i(LOG_TAG, "补结果已送: 方式=Service " + pkg + "/" + cls
+                        + " 前台=" + fg + " 变量=" + sizeOf(variables)
+                        + " 结果码=" + resultCode);
                 return true;
             }
 
             // 默认：发广播（MacroDroid 走的就是这条）
             ctx.sendBroadcast(completion);
+            AppLog.i(LOG_TAG, "补结果已送: 方式=广播 变量=" + sizeOf(variables)
+                    + " 结果码=" + resultCode);
             return true;
         } catch (Throwable t) {
             android.util.Log.w("XSOCR-Plugin", "signalFinish 失败: " + t);
