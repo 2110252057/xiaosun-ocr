@@ -843,7 +843,7 @@ public final class EdgeGesturePrefs {
     }
 
     /**
-     * 把「要监听的方向」同步到**所有手柄**的可触发方向里。
+     * 把「要监听的方向」**排他地**写到**所有手柄**的可触发方向里。
      *
      * ── 为什么需要它 ─────────────────────────────────────
      * MacroDroid / Tasker 的触发器里用户已经选过一次方向了（"向上"、"向右"…）。
@@ -852,22 +852,23 @@ public final class EdgeGesturePrefs {
      * 手柄编辑页把同一个方向再勾一遍，两处配置割裂、极易漏掉。
      * 本方法就是把触发器选的那个方向直接落到手柄上。
      *
-     * ── 为什么是「只打开、不关闭」 ───────────────────────
-     * 触发器表达的只是"我要监听 X"，它**没有资格**关掉用户另外开的方向。
-     * 否则配第二个宏（比如监听"向右"）就会把第一个宏依赖的"向上"关掉，
-     * 表现为"先配的宏突然不灵了"。
-     * 想收窄方向请到手柄编辑页手动关 —— 那里能看到每个方向的开关状态。
+     * ── 为什么是「排他」而不是「追加」 ───────────────────
+     * 触发器里选了哪个方向，意图就是"我只监听这一个"。
+     * 若只做追加，用户把「左下」改成「左上」之后左下仍然开着 ——
+     * 左下滑一下照样触发，宏会跑在意料之外的方向上。
+     * 所以这里**以触发器为准**：选中的打开，其余一律关掉。
+     * 想同时监听多个方向，到手柄编辑页手动开（那里能看到每个方向的状态）。
      *
      * @param dirKey 方向名（{@link #DIR_KEYS} 里的值）；
      *               空串或 null = 任意方向，八个方向全部打开
      * @return 真正被改动的方向个数（0 = 无需改动）
      */
-    public static int enableDirectionsForAllHandles(Context c, String dirKey) {
+    public static int setDirectionsForAllHandles(Context c, String dirKey) {
         try {
             List<Handle> all = getHandles(c);
             if (all == null || all.isEmpty()) return 0;
 
-            // 算出这次要打开哪些方向
+            // 算出这次的目标状态：选中的开、其余全关
             boolean[] want = new boolean[DIR_KEYS.length];
             boolean any = (dirKey == null || dirKey.isEmpty());
             if (any) {
@@ -879,7 +880,7 @@ public final class EdgeGesturePrefs {
                         break;
                     }
                 }
-                // 方向名不认识 —— 不动任何东西，避免误开全方向
+                // 方向名不认识 —— 一个都不动，免得误关掉用户已配好的方向
                 boolean matched = false;
                 for (boolean b : want) if (b) matched = true;
                 if (!matched) return 0;
@@ -888,8 +889,8 @@ public final class EdgeGesturePrefs {
             int changed = 0;
             for (Handle h : all) {
                 for (int i = 0; i < DIR_KEYS.length; i++) {
-                    if (want[i] && !h.enabled[i]) {
-                        h.enabled[i] = true;
+                    if (h.enabled[i] != want[i]) {
+                        h.enabled[i] = want[i];
                         changed++;
                     }
                 }

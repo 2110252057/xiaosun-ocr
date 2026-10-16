@@ -496,22 +496,23 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
                     ? "任意方向"
                     : EdgeGesturePrefs.DIR_LABELS[gsDirIndex(dir) - 1];
 
-            // ★ 把这里选的方向同步到手柄的可触发方向。
+            // ★ 把这里选的方向**排他地**同步到手柄的可触发方向。
             //
             //   不这么做的话，用户在触发器里选了"向上"，回到 App 一看
             //   手柄的"向上"根本没开，滑了不触发 —— 还得去手柄编辑页
             //   再勾一次，两处配置割裂。
             //
-            //   策略是**只打开、不关闭**（原因见该方法注释）：触发器只
-            //   表达"我要监听 X"，无权关掉别的宏依赖的方向。
-            int changed = EdgeGesturePrefs.enableDirectionsForAllHandles(this, dir);
+            //   是**排他**覆盖而非追加：触发器选哪个就只留哪个。
+            //   否则从"左下"改成"左上"后左下还开着，左下滑一下照样触发，
+            //   宏会跑在意料之外的方向上。想同时听多个方向，到手柄编辑页手动开。
+            int changed = EdgeGesturePrefs.setDirectionsForAllHandles(this, dir);
             if (changed > 0) {
                 // 让运行中的悬浮窗服务立刻重建，改完即生效，不用等下次滑动。
                 EdgeGestureService.reload(this);
             }
             AppLog.i("XSOCR-Plugin", "触发器方向已同步到手柄: 方向="
                     + (dir.isEmpty() ? "(任意)" : dir)
-                    + " 新打开的方向数=" + changed);
+                    + " 方向变动数=" + changed);
 
             blurb = "滑动 " + dirLabel;
             if (PluginContract.MODE_EVENT.equals(pluginMode) && !strict) {
