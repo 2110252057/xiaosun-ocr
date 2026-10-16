@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍截图服务的配置。
+
+  【为什么只要这一项能力】
+  本服务的唯一用途是调用 AccessibilityService.takeScreenshot()（API 30+）。
+  它**不订阅任何事件**（未声明 accessibilityEventTypes）、不请求手势能力，
+  因此系统不会把屏幕内容、点击、输入事件交给它。
+  用户勾选它，等于只说了一句「允许你在需要时截一张屏」。
+
+  canTakeScreenshot 对应 CAPABILITY_CAN_TAKE_SCREENSHOT，
+  是 takeScreenshot() 能被调用的前提（应用侧还会再校验一次，双保险）。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canTakeScreenshot="true"
+    android:description="@string/a11y_service_desc"
+    android:notificationTimeout="100" />

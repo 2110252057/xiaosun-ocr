@@ -502,14 +502,35 @@ private static final String PREFS = "xsocr_prefs";
         }
     }
 
-    /** 是否已完成截屏授权（或以 root 方式可用）。 */
+    /** 是否至少有一种截屏方式可用（无障碍 / root / MediaProjection）。 */
     public boolean isScreenCaptureReady() {
-        // ① root 截屏优先：无需授权
+        // ① 无障碍截图：勾选一次即永久可用，不需要 root、不弹授权框，排在最前
+        if (OcrAccessibilityService.isReady()) {
+            return true;
+        }
+        // ② root 截屏优先：无需授权
         if (rootCapture != null && rootCapture.isReady()) {
             return true;
         }
-        // ② 退回 MediaProjection
+        // ③ 退回 MediaProjection
         return screenCapture != null && screenCapture.isReady();
+    }
+
+    /**
+     * 无障碍服务连接/断开时由 {@link OcrAccessibilityService} 回调。
+     *
+     * 【为什么需要它】无障碍服务由系统绑定，连接与断开都不经过本服务，
+     * 因此 screenCaptureReady 这个静态标志不会自己更新 ——
+     * 用户刚在系统设置里勾选完、切回 App，插件却仍以为「截屏没就绪」。
+     *
+     * 只处理「连上」这一个方向：断开时不能简单置 false，
+     * 因为 root / MediaProjection 可能仍然可用，真实状态应由
+     * isScreenCaptureReady() 判定（界面在 onResume 会重新刷新文案）。
+     */
+    static void onAccessibilityStateChanged(boolean connected) {
+        if (connected) {
+            screenCaptureReady = true;
+        }
     }
 
     /**
@@ -529,11 +550,26 @@ private static final String PREFS = "xsocr_prefs";
     /**
      * 截取当前屏幕。
      *
-     * 顺序：root 截屏 → MediaProjection。
-     * 有 root 时完全不需要「开启截屏授权」，也不会出现录屏弹窗。
+     * 顺序：无障碍截图 → root 截屏 → MediaProjection。
+     * 前两者都不需要「开启截屏授权」、也不会弹录屏框；
+     * 无障碍还额外不需要 root，所以放在最前面。
+     * 任一条路失败都继续往下试，不会因为某条路临时失效就整体不可用。
      */
     public synchronized Bitmap captureScreen() throws Exception {
-        // ① root 截屏
+        // ① 无障碍截图
+        OcrAccessibilityService a11y = OcrAccessibilityService.get();
+        if (a11y != null && a11y.canTakeScreenshot()) {
+            try {
+                Bitmap bmp = a11y.capture();
+                if (bmp != null) {
+                    captureMode = "accessibility";
+                    return bmp;
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "无障碍截图失败，尝试退回其它方式: " + t);
+            }
+        }
+        // ② root 截屏
         if (rootCapture != null && rootCapture.isReady()) {
             try {
                 Bitmap bmp = rootCapture.capture();
@@ -552,7 +588,8 @@ private static final String PREFS = "xsocr_prefs";
             return bmp;
         }
         throw new IllegalStateException(
-                "无可用截屏方式：既没有 root，也还没在 App 内点「开启截屏授权」");
+                "无可用截屏方式：无障碍截图未开启、没有 root，"
+                        + "也还没在 App 内点「开启截屏授权」");
     }
 
     /**

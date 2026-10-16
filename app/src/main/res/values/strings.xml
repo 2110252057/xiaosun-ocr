@@ -9,4 +9,11 @@
       原因见 AndroidManifest.xml 里插件组件那一段注释。
     -->
     <string name="tasker_event_name">小孙OCR · 边缘滑动事件</string>
+    <!--
+      无障碍截图服务：名字与说明都会显示在系统「设置 → 无障碍」列表里，
+      所以要说清「为什么需要它」，否则用户看到「无障碍」三个字会以为
+      应用要读屏幕内容而不敢开。
+    -->
+    <string name="a11y_service_name">小孙OCR 截图</string>
+    <string name="a11y_service_desc">只用于「截图识别」这一项功能：勾选后无需 root、无需录屏授权，即可随时截屏。本服务不读取屏幕内容，不接收点击或按键事件。</string>
 </resources>

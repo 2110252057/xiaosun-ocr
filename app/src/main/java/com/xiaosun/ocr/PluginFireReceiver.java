@@ -412,8 +412,11 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
             boolean ok = requestScreenCaptureIfNeeded(ctx, deadline);
 
             if (!ok) {
-                fail(vars, "截屏未就绪。"
-                        + "请在「小孙OCR」中开启「悬浮窗权限」（插件才能自动申请截屏），"
+                fail(vars, "截屏未就绪。三选一："
+                        + "① 在小孙OCR 的「OCR设置」页点「无障碍截图」，"
+                        + "在系统设置里勾选一次（最省事，之后免授权）；"
+                        + "② 有 root 的设备会自动走 screencap；"
+                        + "③ 开启「悬浮窗权限」（插件才能自动申请截屏）"
                         + "或打开 App 手动点一次「开启截屏授权」。");
                 return;
             }

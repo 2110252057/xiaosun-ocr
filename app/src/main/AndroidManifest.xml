@@ -161,6 +161,34 @@
           改为在 onStartCommand 里用 checkCallingPermission 校验：
           系统 / shell（automation 脚本的发起者）不受限，第三方 App 会被拒绝。
         -->
+        <!--
+          无障碍截图服务（Android 11+）。
+
+          【它是什么】用户只在系统「无障碍」列表里勾选一次，之后本应用就能
+          随时调用 takeScreenshot() 截图 —— 不需要 root，也不再弹录屏授权框。
+          这正是宏/无人值守场景最缺的一条路：MediaProjection 每次重启都
+          要用户手点一次，root 又不是每台机器都有。
+
+          【它不做什么】onAccessibilityEvent 是空实现，配置里也没声明任何
+          accessibilityEventTypes —— 它收不到屏幕文本、控件树、点击或按键，
+          只保留「截图」这一项能力。
+
+          BIND_ACCESSIBILITY_SERVICE 是系统级权限：只有系统能绑定本服务，
+          第三方应用无法自行拉起它。
+        -->
+        <service
+            android:name=".OcrAccessibilityService"
+            android:exported="true"
+            android:label="@string/a11y_service_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <service
             android:name=".OCRService"
             android:enabled="true"

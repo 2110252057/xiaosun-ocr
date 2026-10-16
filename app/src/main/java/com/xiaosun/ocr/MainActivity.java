@@ -51,7 +51,7 @@ import java.io.InputStream;
  * 主界面。
  *
  * 打开 App 自动拉起本地 OCR 服务（端口见 {@link OCRService#HTTP_PORT}）。
- * 两个页签：接口文档 / 在线调试
+ * 两个页签：OCR设置 / 滑动触发
  *
  * 调试页：选中图片直接在预览框显示，识别后把检测框画在预览图上，
  * 结果区按所选格式显示（纯文本时只输出文字本身）。
@@ -66,6 +66,13 @@ public class MainActivity extends AppCompatActivity {
     // 于是"服务实际监听端口 / 通知栏文案 / 界面文档 / 客户端请求"四处
     // 全部来自同一个常量，改端口只改一处。
     private static final String LOCAL_URL = Http.URL_BASE;
+    /**
+     * 无障碍服务在系统「无障碍」列表里的显示名。
+     *
+     * 必须与 strings.xml 的 a11y_service_name 一字不差 ——
+     * 引导用户去勾选时，文案里出现的就是这个名字，对不上他就找不到。
+     */
+    private static final String A11Y_LABEL = "小孙OCR 截图";
     private static final int REQ_PICK_IMAGE = 1001;
     private static final int REQ_SCREEN_CAPTURE = 1002;
 
@@ -84,8 +91,18 @@ public class MainActivity extends AppCompatActivity {
     private static final int C_CODE_BG = 0xFF1E2029;
     private static final int C_CODE_TEXT = 0xFFC8D0E0;
 
-    // 【新增】第三个页签：边缘滑动手势触发器。
-    private final String[] tabs = {"接口文档", "在线调试", "滑动触发"};
+    /**
+     * 页签列表。
+     *
+     * 【为什么只剩两个】
+     * 原来第一页是「接口文档」（HTTP 接口的参数表 + 多语言调用示例），
+     * 第二页是「在线调试」（开关、状态、保活、截屏、图片预览）。
+     * 但宏早就可以直接在 MacroDroid 里选插件配置，照着文档手写 HTTP 调用
+     * 这条路已经没人走了 —— 文档页从此只是占地方。
+     * 于是文档页整页删除，它上面唯一仍然有用的「总开关」搬到调试页，
+     * 两页合并成一页，改名叫「OCR设置」。
+     */
+    private final String[] tabs = {"OCR设置", "滑动触发"};
     private LinearLayout contentContainer;
     // 长度跟随 tabs，避免以后加页签时数组越界。
     private final View[] tabViews = new View[tabs.length];
@@ -202,7 +219,9 @@ public class MainActivity extends AppCompatActivity {
         Runnable poll = new Runnable() {
             @Override
             public void run() {
-                boolean ready = OCRService.screenCaptureReady;
+                // 无障碍是进程内实时状态，不必等服务的静态标志同步
+                boolean ready = OCRService.screenCaptureReady
+                        || OcrAccessibilityService.isReady();
                 captureReady = ready;
                 updateCaptureInfo();
                 // 已就绪，或已重试到上限（避免无限轮询）就停下
@@ -369,9 +388,7 @@ public class MainActivity extends AppCompatActivity {
         cancelGestureRecheck();
         tvGestureState = null;
         if (index == 0) {
-            buildDocPage(contentContainer);
-        } else if (index == 1) {
-            buildDebugPage(contentContainer);
+            buildOcrSettingsPage(contentContainer);
         } else {
             buildGesturePage(contentContainer);
         }
@@ -780,63 +797,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ============================================================
-    //  接口文档页
-    // ============================================================
-
-    private void buildDocPage(ViewGroup parent) {
-        LinearLayout card = (LinearLayout) statusCard("服务已就绪", LOCAL_URL);
-        parent.addView(card, cardLp());
-        tvStatusDot = (TextView) card.getChildAt(0);
-        tvStatusText = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(0);
-        tvStatusSub = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(1);
-        addCard(parent, buildOcrSwitchCard());
-
-        addCard(parent, buildParamCard());
-
-        addSectionTitle(parent, "调用示例");
-
-        addCodeCard(parent, "截屏识别 · 不传图片", "// 服务端自动截取当前屏幕并识别（推荐）\n"
-                + "var res = http.post(\"" + LOCAL_URL + "\",\n"
-                + "    { \"type\": \"2\" });\n"
-                + "log(res.body.string());\n\n"
-                + "// 有 root：直接可用，无需任何授权\n"
-                + "// 无 root：需在 App 内点一次「开启截屏授权」");
-
-        addCodeCard(parent, "Auto.js · 传路径", "// 截屏保存\nvar path = \"/sdcard/test.png\";\n"
-                + "if (!requestScreenCapture()) { toast(\"无权限\"); exit(); }\n"
-                + "sleep(1000);\ncaptureScreen(path);\n\n"
-                + "// 调用 OCR\nvar res = http.post(\"" + LOCAL_URL + "\",\n"
-                + "    { \"path\": path, \"type\": \"1\" });\n"
-                + "toast(res.body.string());");
-
-        addCodeCard(parent, "AutoGo", "-- AutoGo 调用示例\n"
-                + "import \"http\"\nimport \"file\"\n\n"
-                + "local path = \"/sdcard/test.png\"\n"
-                + "snapshot(path, 0, 0, -1, -1)\n\n"
-                + "local url = \"" + LOCAL_URL + "\"\n"
-                + "local postData = \"path=\" .. path .. \"&type=1\"\n"
-                + "local res = http.post(url, postData)\nprint(res)");
-
-        addCodeCard(parent, "Java", "URL url = new URL(\"" + LOCAL_URL + "\");\n"
-                + "HttpURLConnection conn = (HttpURLConnection) url.openConnection();\n"
-                + "conn.setRequestMethod(\"POST\");\n"
-                + "conn.setRequestProperty(\"Content-Type\", \"application/json\");\n"
-                + "conn.setDoOutput(true);\n\n"
-                + "String body = \"{\\\"path\\\":\\\"/sdcard/test.png\\\",\\\"type\\\":1}\";\n"
-                + "conn.getOutputStream().write(body.getBytes(\"UTF-8\"));\n\n"
-                + "// 读取 conn.getInputStream() 即为识别结果 JSON");
-
-        addCodeCard(parent, "Python", "import requests\n\n"
-                + "r = requests.post(\"" + LOCAL_URL + "\",\n"
-                + "                  json={\"path\": \"/sdcard/test.png\", \"type\": 1})\n"
-                + "print(r.text)");
-
-        addSectionTitle(parent, "命令行启动服务");
-        addCodeCard(parent, "adb / shell",
-                "am start-foreground-service com.xiaosun.ocr/.OCRService");
-    }
-
     /**
      * 「启用 OCR 服务」开关卡片。
      *
@@ -908,121 +868,31 @@ public class MainActivity extends AppCompatActivity {
         return card;
     }
 
-    private View buildParamCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(16), dp(16), dp(16));
-        card.setElevation(dp(1));
 
-        addParamRow(card, "path", "图片绝对路径（需文件权限）");
-        addParamRow(card, "type", "1 = 纯文本  ·  2 = Json 数组(含坐标)  ·  3 = 详细 Json(含矩形)");
-        addParamRow(card, "tier", "可选：tiny（轻量，默认）/ small（高精度）/ rapid（ML Kit，最快）。切换后持续生效");
 
-        TextView note = new TextView(this);
-        note.setText("不传 path 时，服务会自动截取当前屏幕后识别。\n"
-                + "截屏无需授权：有 root 走 screencap，否则先在「在线调试」页点一次「开启截屏授权」。\n"
-                + "支持 JSON Body / form 表单 / query 三种提交方式");
-        note.setTextSize(11.5f);
-        note.setTextColor(C_HINT);
-        note.setLineSpacing(0f, 1.3f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(10);
-        note.setLayoutParams(lp);
-        card.addView(note);
-
-        return card;
-    }
-
-    private void addParamRow(LinearLayout parent, String key, String desc) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rowLp.topMargin = dp(8);
-        row.setLayoutParams(rowLp);
-
-        TextView k = new TextView(this);
-        k.setText(key);
-        k.setTextSize(12.5f);
-        k.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        k.setTextColor(C_BRAND);
-        LinearLayout.LayoutParams kLp = new LinearLayout.LayoutParams(
-                dp(66), ViewGroup.LayoutParams.WRAP_CONTENT);
-        k.setLayoutParams(kLp);
-        row.addView(k);
-
-        TextView d = new TextView(this);
-        d.setText(desc);
-        d.setTextSize(12.5f);
-        d.setTextColor(C_TEXT_SUB);
-        d.setLineSpacing(0f, 1.25f);
-        row.addView(d, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        parent.addView(row);
-    }
-
-    private void addCodeCard(ViewGroup parent, String label, String code) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(C_CODE_BG);
-        bg.setCornerRadius(dp(14));
-        card.setBackground(bg);
-        card.setElevation(dp(1));
-
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(16), dp(12), dp(16), 0);
-
-        TextView dot = new TextView(this);
-        dot.setBackgroundResource(R.drawable.dot_warn);
-        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(8), dp(8));
-        dotLp.setMarginEnd(dp(8));
-        head.addView(dot, dotLp);
-
-        TextView labelView = new TextView(this);
-        labelView.setText(label);
-        labelView.setTextSize(11.5f);
-        labelView.setTextColor(0xFF8B93A6);
-        head.addView(labelView);
-
-        card.addView(head);
-
-        TextView tv = new TextView(this);
-        tv.setText(code);
-        tv.setTextSize(12);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setTextColor(C_CODE_TEXT);
-        tv.setPadding(dp(16), dp(10), dp(16), dp(16));
-        tv.setLineSpacing(dp(3), 1f);
-        tv.setTextIsSelectable(true);
-        tv.setHorizontallyScrolling(true);
-
-        android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(this);
-        hs.setHorizontalScrollBarEnabled(false);
-        hs.addView(tv);
-        card.addView(hs);
-
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.bottomMargin = dp(10);
-        parent.addView(card, lp);
-    }
 
     // ============================================================
-    //  在线调试页
+    //  OCR设置页
     // ============================================================
+    /**
+     * 「OCR设置」页 = 原「在线调试」页 + 原「接口文档」页里的总开关。
+     *
+     * 【合并理由】宏现在直接在 MacroDroid 里选插件配置，没人再照着
+     * 接口文档手写 HTTP 请求了。文档页删掉，只把仍然有用的
+     * 「启用 OCR 服务」开关搬过来 —— 它本来就是「要不要开这个服务」，
+     * 和这一页的状态、保活、截屏、预览是同一件事。
+     */
 
-    private void buildDebugPage(ViewGroup parent) {
+    private void buildOcrSettingsPage(ViewGroup parent) {
         // 服务状态
         LinearLayout card = (LinearLayout) statusCard("服务已就绪", LOCAL_URL);
         parent.addView(card, cardLp());
         tvStatusDot = (TextView) card.getChildAt(0);
         tvStatusText = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(0);
+        // 副标题＝接口地址；关掉开关后 refreshStatus() 会把它显示成「接口未监听」
+        tvStatusSub = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(1);
+        // 总开关：自「接口文档」页并入
+        addCard(parent, buildOcrSwitchCard());
 
         // 电池优化
         LinearLayout bat = new LinearLayout(this);
@@ -1107,16 +977,22 @@ public class MainActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         capRow2Lp.topMargin = dp(4);
         capRow2.setLayoutParams(capRow2Lp);
-        capRow2.addView(secondaryButton("开启截屏授权（无 root 时用）",
-                v -> requestScreenCapture()), weightLp());
+        // 三种截屏方式并列：无障碍（最省事，免 root 免授权）／root（自动）／
+        // MediaProjection（手动授权一次）。
+        capRow2.addView(secondaryButton("无障碍截图", v -> openAccessibilitySettings()),
+                weightLp());
+        capRow2.addView(secondaryButton("开启截屏授权", v -> requestScreenCapture()),
+                weightLp());
         capRow2.addView(secondaryButton("悬浮窗权限", v -> requestOverlayPermission()),
                 weightLp());
         capCard.addView(capRow2);
 
         TextView capNote = new TextView(this);
-        capNote.setText("有 root 的设备会自动启用 root 截屏（screencap），"
-                + "无需任何授权、也不会弹录屏框。\n"
-                + "无 root 时才需要「开启截屏授权」。\n\n"
+        capNote.setText("① 无障碍截图（推荐）：点开后勾选「" + A11Y_LABEL + "」，"
+                + "之后随时可截、不弹框、不需要 root。\n"
+                + "② root 截屏：设备有 root 时自动启用（screencap），同样免授权。\n"
+                + "③ 截屏授权：无 root 时的兜底，每次重启都要手点一次录屏授权。\n\n"
+                + "三者按上面的顺序自动挑选，任一可用即可，不必都开。\n"
                 + "「悬浮窗权限」建议一并开启：MacroDroid 在后台触发插件时，"
                 + "App 需要它才能自动弹出截屏授权框（否则只能先手动打开 App 授权）。");
         capNote.setTextSize(11);
@@ -1301,9 +1177,16 @@ public class MainActivity extends AppCompatActivity {
         if (capInfo == null) {
             return;
         }
+        // 无障碍是「有没有勾选」的实时状态，不看 captureMode ——
+        // captureMode 只在真正截过一次之后才会被写上。
+        boolean a11y = OcrAccessibilityService.isReady();
         boolean root = "root".equals(OCRService.captureMode);
         boolean mp = "mediaprojection".equals(OCRService.captureMode);
-        if (root) {
+        if (a11y) {
+            capInfo.setText("● 无障碍截图已启用，无需授权，可直接截屏识别");
+            capInfo.setTextColor(C_OK);
+            captureReady = true;
+        } else if (root) {
             capInfo.setText("● root 截屏已启用，无需授权，可直接截屏识别");
             capInfo.setTextColor(C_OK);
             captureReady = true;
@@ -1316,8 +1199,10 @@ public class MainActivity extends AppCompatActivity {
             boolean overlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
                     || android.provider.Settings.canDrawOverlays(this);
             StringBuilder sb = new StringBuilder();
-            sb.append("○ 未就绪：无 root 时请点击「开启截屏授权」\n")
-              .append("（有 root 的设备会自动启用 root 截屏，免授权）");
+            sb.append("○ 未就绪，三种方式任选其一：\n")
+              .append("· 点「无障碍截图」勾选一次，之后永久免授权（推荐）\n")
+              .append("· 有 root 的设备会自动启用 root 截屏\n")
+              .append("· 或点「开启截屏授权」走录屏授权（重启后需重新点）");
             if (!overlay) {
                 sb.append("\n⚠ 未开启「悬浮窗权限」：插件在后台无法自动申请截屏");
             }
@@ -1328,7 +1213,7 @@ public class MainActivity extends AppCompatActivity {
 
     /** 通过服务暴露的静态标志确认截屏是否真的就绪。 */
     private void probeCaptureReady() {
-        captureReady = OCRService.screenCaptureReady;
+        captureReady = OCRService.screenCaptureReady || OcrAccessibilityService.isReady();
         updateCaptureInfo();
         if (captureReady) {
             toast("截屏授权已开启，现在可直接截屏识别");
@@ -1354,6 +1239,35 @@ public class MainActivity extends AppCompatActivity {
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE);
         } catch (Exception e) {
             toast("申请截屏失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 跳到系统「无障碍」设置页。
+     *
+     * 【为什么不能像普通权限那样 requestPermissions】
+     * 无障碍服务只能由用户在系统设置里手动勾选，应用无权自行开启 ——
+     * 这是 Android 的设计（否则任何 App 都能偷偷拿到屏幕内容）。
+     * 所以这里只负责把用户送到那一页，剩下的由他自己决定。
+     */
+    private void openAccessibilitySettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            toast("无障碍截图需要 Android 11 及以上，"
+                    + "本机请改用 root 或「开启截屏授权」");
+            return;
+        }
+        if (OcrAccessibilityService.isReady()) {
+            toast("无障碍截图已开启，可直接截屏识别");
+            return;
+        }
+        try {
+            Intent intent = new Intent(
+                    android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            toast("请在列表中找到「" + A11Y_LABEL + "」并开启");
+        } catch (Exception e) {
+            toast("无法打开无障碍设置: " + e.getMessage());
         }
     }
 
@@ -1403,15 +1317,16 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         // 先按服务的真实状态判断（root 可用时 captureReady 可能还没同步过来）
-        boolean readyNow = OCRService.screenCaptureReady;
+        boolean readyNow = OCRService.screenCaptureReady
+                || OcrAccessibilityService.isReady();
         if (!readyNow && !captureReady) {
             // 有 root 但还没探测完时，只提示等待，不要弹授权框
             if (RootScreenCaptureManager.isRootAvailable()) {
                 toast("正在初始化 root 截屏，请稍候再试");
                 refreshCaptureMode();
             } else {
-                toast("请先点击“开启截屏授权”");
-                requestScreenCapture();
+                toast("请先开启「无障碍截图」，或点「开启截屏授权」");
+                openAccessibilitySettings();
             }
             return;
         }
