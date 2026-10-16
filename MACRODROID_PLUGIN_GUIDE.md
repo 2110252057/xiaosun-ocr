@@ -492,6 +492,13 @@ for (String key : vars.keySet()) {
 一个变量都没回。结果就是「动作能拿到变量，事件触发器里变量全是空的」——
 宏确实被触发了，但 `%xsocr_menu_index` 之类全是空值。
 
+> 💡 注意区分两种「空」：
+> - **没选中菜单**（滑到空白处松手 / 触摸被系统抢走）→ 我们**故意不回传**
+>   菜单变量，宏侧判「有没有收到 `%xsocr_menu_index`」。
+> - **该回却没回**（这条链路的 bug）→ 选中了也拿不到，才是问题。
+>   两者在宏里都表现为「变量空」，排查时先看日志里
+>   `条件应答: 结果码=16 变量=3` 这一行 —— 变量=3 说明我们送出去了。
+
 **事件链路的正确写法**（参照 AutoInput，`com.joaomgcd.autoinput`）：
 
 ```java
@@ -662,7 +669,7 @@ public static volatile String gsLastEvent = "";          // 恒为 "trigger"（�
 public static volatile int    gsSeq = 0;                 // 每触发一次 +1
 public static volatile long   gsLastAt = 0L;             // 毫秒时间戳
 // 菜单结果
-public static volatile int    menuIndex = -1;            // -1 = 取消
+public static volatile int    menuIndex = -1;            // < 0 = 没选中（不回传变量）
 public static volatile String menuText = "";
 public static volatile String menuAction = "";
 ```
@@ -928,21 +935,27 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 
 | 变量 | 含义 |
 |---|---|
-| `%xsocr_menu_index` | 选中项序号（从 0 开始）；**-1 = 取消或没启用菜单** |
-| `%xsocr_menu_text` | 选中项的名字 |
-| `%xsocr_menu_action` | 选中项的动作值 |
+| `%xsocr_menu_index` | 选中项序号（从 0 开始）；**没选中时本变量不出现** |
+| `%xsocr_menu_text` | 选中项的名字；没选中时不出现 |
+| `%xsocr_menu_action` | 选中项的动作值；没选中时不出现 |
+
+> ★ **没选中就一个变量都不传**（不是传 `-1` / 空串）。
+> 菜单弹出来了、但滑到空白处松手，或者这批触摸被系统抢走 ——
+> 这几种情况都算「没选中」，宏收到的菜单变量是**空的**。
+> 宏里判「有没有收到 `%xsocr_menu_index`」即可，不必记 `-1` 这种魔法值。
 
 宏里这样分支：
 
 ```
-如果 %xsocr_menu_index = -1    → 什么都不做（滑到空白处松手了）
+如果 %xsocr_menu_index 为空   → 什么都不做（滑到空白处松手了）
 如果 %xsocr_menu_action = shot → 截图
 如果 %xsocr_menu_action = ocr  → OCR 识别
 ```
 
-⚠ 一个细节：`index` 是用 `putInt` 放进变量 Bundle 的（和 `%xsocr_x` 一致，
-类型更规范）。宿主最终仍会把它转成文本，所以宏里按字符串比较即可；
-但**读取方别再调 `getString()`**，会抛 `ClassCastException`。
+⚠ 一个细节：`index` 是用 `putIntAsString()` 放进变量 Bundle 的 ——
+Tasker 的变量协议只认 String / String[] / ArrayList&lt;String&gt;，
+用 `putInt` 会被它静默丢弃（详见 6.1）。宿主最终把它当文本，
+所以宏里按字符串比较即可。
 
 #### 实现要点（改插件时别踩）
 
@@ -1017,14 +1030,14 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 | 变量声明 | 配置界面 `putExtra(RELEVANT_VARIABLES, ...)`，**三段式** |
 | 变量映射 | 用户必须在「Output variables」里手动映射 |
 | 改代码后 | **必须重新配置插件动作** |
-| 变量值类型 | 最终统一转成字符串，但 `putInt` 更规范 |
+| 变量值类型 | 一律字符串（`putIntAsString`）；`putInt` 会被 Tasker 丢弃 |
 | 后台限制 | 广播后 10 秒豁免窗口；悬浮窗权限可解除 |
 | 手势方向匹配 | 在 `PluginConditionReceiver` 里比对，**不匹配回 17**，宏不跑 |
 | **手势变量（gs_*）** | **已全部撤除**，只做内部匹配用，不对外回传 |
 | **菜单在哪配** | 本应用设置页（`EdgeGestureMenuActivity`），宏不参与 |
 | **菜单项没填图标** | 显示名字**前两个字**（仅一字就显示一字），字号自动收窄 |
 | **App 从最近任务隐藏** | `AppTask.setExcludeFromRecents()`；Intent 标志 / 重建 task 均无效 |
-| **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_text` / `%xsocr_menu_action`，**-1 = 取消** |
+| **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_text` / `%xsocr_menu_action`；**没选中就一个都不传** |
 | **跟手菜单前提** | 菜单必须由拿住触摸的那个窗口弹，宏弹不了 |
 | **菜单窗口变形** | 只能 `updateViewLayout()` 原地长大，`removeView()+addView()` 会收到 ACTION_CANCEL，手势当场中断 |
 | **截屏方式（三条）** | 无障碍（免授权，API 30+）→ root → MediaProjection，自动挑选 |

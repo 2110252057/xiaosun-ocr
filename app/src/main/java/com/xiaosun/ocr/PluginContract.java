@@ -387,11 +387,18 @@ public final class PluginContract {
 
     // ==================== 手势菜单（插件 → 宏 回传结果） ====================
 
-    /** 选中项索引；-1 = 选中了「设置」项或滑到空白处取消。 */
+    /**
+     * 选中项索引（从 0 开始）。
+     *
+     * ★ 「没选中」时这个变量**根本不会出现** —— 见 {@link #buildMenuVars()}：
+     *   菜单弹出来了、但手指滑到空白处松手（或这批触摸被系统抢走），
+     *   三个菜单变量一个都不传。宏侧判「有没有收到」即可，
+     *   不必再去比 -1 这种魔法值。
+     */
     public static final String VAR_MENU_INDEX = VARIABLE_PREFIX + "xsocr_menu_index";
-    /** 选中项的显示文字（取消时为空）。 */
+    /** 选中项的显示文字（没选中时不会出现这个变量）。 */
     public static final String VAR_MENU_TEXT = VARIABLE_PREFIX + "xsocr_menu_text";
-    /** 选中项的 source / 动作串（取消时为空）。 */
+    /** 选中项的 source / 动作串（没选中时不会出现这个变量）。 */
     public static final String VAR_MENU_ACTION = VARIABLE_PREFIX + "xsocr_menu_action";
 
     // ==================== 工具方法 ====================
@@ -424,16 +431,31 @@ public final class PluginContract {
      * 数据源是 EdgeGesturePrefs 的静态快照（抬手那一刻记下的），
      * 不是实时状态。
      *
+     * ★ 「没选中」时返回**空 Bundle** —— 三个变量一个都不传。
+     *
+     *   什么叫没选中：
+     *     · 菜单弹出来了，但手指滑到空白处松手（menuIndex == -1）；
+     *     · 这批触摸被系统抢走（ACTION_CANCEL），压根没抬手；
+     *     · 菜单没启用（滑过距离时走的是直接触发，不会有菜单结果）。
+     *
+     *   为什么不是传 "-1/空/空"：那样宏侧必须记住"-1 是个特殊值"，
+     *   而且分不清「这次没选中」和「上次选中、这次没刷新」——
+     *   宿主对没出现在 Bundle 里的变量通常保留上一次的值，
+     *   于是宏会拿上一次的旧结果接着跑。不传变量，宏用
+     *   「有没有收到 %xsocr_menu_index」判断，语义最干净。
+     *
      * 全程 try/catch：变量缺失不该让整个查询应答失败。
      */
     public static android.os.Bundle buildMenuVars() {
         android.os.Bundle vars = new android.os.Bundle();
         try {
+            // 没选中 → 什么都不回（连 index 都不出现）
+            if (EdgeGesturePrefs.menuIndex < 0) {
+                return vars;
+            }
             // ★ 用字符串回传，不能用 putInt —— 见 putIntAsString() 的注释：
             //   Tasker 的变量协议只认 String / String[] / ArrayList<String>，
             //   回 Integer 会被它丢弃，表现为「菜单索引传不过去」。
-            // 没配菜单时 menuIndex 恒为 -1，宏侧读到 "-1" 即表示
-            // 「这次不是菜单选项触发的」。
             putIntAsString(vars, VAR_MENU_INDEX, EdgeGesturePrefs.menuIndex);
             String mtext = EdgeGesturePrefs.menuText;
             vars.putString(VAR_MENU_TEXT, mtext == null ? "" : mtext);
@@ -509,11 +531,14 @@ public final class PluginContract {
      * 而手势方向 / 序号 / 时间 / 手柄也不再列 —— 方向匹配插件已经做了，
      * 其余是调试信息；用户在 MacroDroid 里自行建变量接值，名字由用户定。
      * 留菜单三项是因为「用户点了哪一项」只有插件知道。
+     *
+     * ★ 没选中任何项时这三个变量**都不会被回传**（不是传空值）：
+     *   宏侧判「%xsocr_menu_index 有没有值」即可知道这次是不是真的选了。
      */
     public static final String[] MENU_VARIABLES = {
-            VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始；-1 = 取消或未启用菜单）",
-            VAR_MENU_TEXT   + "\n菜单文字\n选中项的显示文字（取消时为空）",
-            VAR_MENU_ACTION + "\n菜单动作\n选中项的动作串（取消时为空）",
+            VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始）；**没选中时本变量不出现**",
+            VAR_MENU_TEXT   + "\n菜单文字\n选中项的显示文字；没选中时不出现",
+            VAR_MENU_ACTION + "\n菜单动作\n选中项的动作串；没选中时不出现",
     };
 
     /** 触发器模式下的变量预告（只含菜单结果）。 */

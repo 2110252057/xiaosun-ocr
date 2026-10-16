@@ -419,6 +419,10 @@ extends Service {
         }
         AppLog.i(TAG, "触发手势: 手柄=" + handle.name + " 方向=" + (dir >= 0 ? dir : -1)
                 + " 事件=" + handle.event + " 震动=" + handle.haptic);
+        // 【不要在这里清菜单结果】
+        // 选中路径是「先 recordMenuChoice(idx, ...) 再 fire()」——
+        // 在这儿清零会把刚写好的选中值抹掉，菜单选了也传不出去。
+        // 「菜单没启用」那条路径的清零放在它的调用点上。
         EdgeGesturePrefs.recordGesture((Context)this, handle, dir, handle.event);
         if (handle.haptic) {
             EdgeGesturePrefs.buzz((Context)this, true);
@@ -1619,8 +1623,16 @@ extends Service {
                     if (!this.fired && (dir = EdgeGestureService.dirOf(dx, dy)) >= 0 && this.handle.enabled[dir] && dist >= (float)this.dp(this.handle.distanceOf(dir))) {
                         this.fired = true;
                         if (this.menuConfigured() && this.tryOpenMenu(dir, e.getRawX(pi), e.getRawY(pi))) {
+                            // 菜单刚弹开、还没选中任何项 —— 清掉上一次的结果。
+                            // 中途触摸被系统抢走（没有抬手）时，宏就不该收到
+                            // 上一次的旧选中值。
+                            EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             return true;
                         }
+                        // 走到这里 = 本次没有菜单（没启用菜单，或菜单没弹出来）：
+                        // 清掉上一次的选中值，免得静态字段里的陈旧值被当成本次结果
+                        // 传给宏（buildMenuVars 靠 menuIndex < 0 判断「不回传」）。
+                        EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                         EdgeGestureService.this.fire(this.handle, dir);
                     }
                     return true;
@@ -1656,12 +1668,17 @@ extends Service {
                                 EdgeGesturePrefs.recordMenuChoice(idx, it.text, it.action);
                             } else {
                                 AppLog.i(EdgeGestureService.TAG, "菜单取消（抬手处没命中任何项）: 手指=("
-                                        + (int)e.getX() + "," + (int)e.getY() + ")");
+                                        + (int)e.getX() + "," + (int)e.getY() + ")"
+                                        + " —— 本次不回传菜单变量");
                                 EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             }
                             this.closeMenu();
                             EdgeGestureService.this.fire(this.handle, dir);
                         } else {
+                            // 这批触摸被系统抢走（ACTION_CANCEL），没等到抬手，
+                            // 同样按「没选中」处理 —— 不回传菜单变量。
+                            AppLog.i(EdgeGestureService.TAG,
+                                    "菜单取消（触摸被系统抢走，未抬手）—— 本次不回传菜单变量");
                             EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             this.closeMenu();
                         }
