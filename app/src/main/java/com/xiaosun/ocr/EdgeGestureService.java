@@ -1014,11 +1014,17 @@ extends Service {
                 } else {
                     String t2 = this.menuItems.get((int)i).text;
                     if (t2 != null && t2.length() > 0) {
+                        // 没有图标就用文字顶着，取前两个字 ——
+                        // 一个字信息量太少（「微」「设」看不出是哪个应用），
+                        // 两个字基本能认出来，又不至于溢出圆底。
+                        // 名字本来就只有一个字时，自然只显示一个字。
+                        String label = t2.length() > 2 ? t2.substring(0, 2) : t2;
                         p.setColor(on ? -1 : (this.isLightColor(this.menuBgColor) ? -14540254 : -1));
-                        p.setTextSize(iconPx * 0.34f);
+                        // 两个字比一个字宽，字号相应收一点，免得顶出圆底。
+                        p.setTextSize(iconPx * (label.length() > 1 ? 0.26f : 0.34f));
                         p.setTextAlign(Paint.Align.CENTER);
                         float cy = cy0 - (p.descent() + p.ascent()) / 2.0f;
-                        c.drawText(t2.substring(0, 1), cx0, cy, p);
+                        c.drawText(label, cx0, cy, p);
                     }
                 }
                 if (!this.menuShowText || (t = this.menuItems.get((int)i).text) == null || t.length() <= 0) continue;

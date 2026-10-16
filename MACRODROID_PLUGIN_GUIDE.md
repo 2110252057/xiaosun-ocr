@@ -861,7 +861,7 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 |---|---|
 | 名字 | 显示在菜单按钮上的文字，必填 |
 | 动作值 | 回传给宏的 `%xsocr_menu_action`；留空就和名字一样 |
-| 图标 | `app:包名` / `file:路径` / 资源名，留空用名字首字顶着 |
+| 图标 | `app:包名` / `file:路径` / 资源名，留空则显示名字前两个字 |
 
 **动作值为什么要单独一栏**：名字是给人看的、动作值是给宏比的。
 两者分开之后，按钮可以叫「微信」而动作值叫 `wechat`，
@@ -872,7 +872,7 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 ```
 名字=截图   动作值=shot    图标=app:com.miui.screenshot
 名字=OCR    动作值=ocr     图标=app:com.xiaosun.ocr
-名字=翻译   动作值=trans   图标=（留空，显示「翻」）
+名字=翻译   动作值=trans   图标=（留空，显示「翻译」）
 ```
 
 > 注：本应用 `targetSdk 34`，受包可见性（package visibility）限制，
@@ -938,6 +938,23 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
   此时 `getX()` 是相对手柄那条窄条的坐标，换算出来会落在屏幕左上角。
   必须存 `getRawX()/getRawY()`，排版时再用 `getLocationOnScreen()` 转回 View 坐标。
 
+### 7.7 菜单项没填图标时显示什么
+
+菜单项只填了名字、没填图标时，按钮上直接用**名字的前两个字**顶着
+（名字本来就只有一个字，就显示一个字），字号会自动收窄一点。
+
+规则分布在两处，**必须保持一致**：
+
+| 位置 | 作用 |
+|---|---|
+| `EdgeGestureService.drawMenu()` | 悬浮窗里**实际绘制**的菜单 |
+| `EdgeGestureMenuActivity` | 设置页里的**缩略图预览** |
+
+> 早期只取**首字**，识别度太低 ——「微」「设」这种完全看不出是哪个应用；
+> 改成两个字后基本能认出来，又不会溢出圆底。
+> `MenuIcons.describeSource()` 里那句「无图标（显示文字前两个字）」
+> 就是这条规则的提示文案。
+
 ---
 
 ## 八、要点速查表
@@ -964,6 +981,8 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 | 手势方向匹配 | 在 `PluginConditionReceiver` 里比对，**不匹配回 17**，宏不跑 |
 | **手势变量（gs_*）** | **已全部撤除**，只做内部匹配用，不对外回传 |
 | **菜单在哪配** | 本应用设置页（`EdgeGestureMenuActivity`），宏不参与 |
+| **菜单项没填图标** | 显示名字**前两个字**（仅一字就显示一字），字号自动收窄 |
+| **App 从最近任务隐藏** | `AppTask.setExcludeFromRecents()`；Intent 标志 / 重建 task 均无效 |
 | **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_text` / `%xsocr_menu_action`，**-1 = 取消** |
 | **跟手菜单前提** | 菜单必须由拿住触摸的那个窗口弹，宏弹不了 |
 | **菜单窗口变形** | 只能 `updateViewLayout()` 原地长大，`removeView()+addView()` 会收到 ACTION_CANCEL，手势当场中断 |

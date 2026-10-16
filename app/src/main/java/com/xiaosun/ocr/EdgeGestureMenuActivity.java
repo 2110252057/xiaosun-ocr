@@ -484,8 +484,11 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                     ViewGroup.LayoutParams.MATCH_PARENT));
         } else {
             TextView ch = new TextView(this);
-            ch.setText(it.text.length() > 0 ? it.text.substring(0, 1) : "?");
-            ch.setTextSize(14);
+            // 与悬浮窗保持同一套规则：没图标时显示前两个字（只有一个就显示一个）。
+            // 缩略图格子只有 32dp，两个字得把字号收一点才装得下。
+            String label = it.text.length() > 2 ? it.text.substring(0, 2) : it.text;
+            ch.setText(label.length() > 0 ? label : "?");
+            ch.setTextSize(label.length() > 1 ? 11f : 14);
             ch.setTypeface(null, android.graphics.Typeface.BOLD);
             ch.setTextColor(C_BRAND);
             ch.setGravity(Gravity.CENTER);

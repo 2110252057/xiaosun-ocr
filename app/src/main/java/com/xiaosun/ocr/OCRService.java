@@ -362,6 +362,13 @@ private static final String PREFS = "xsocr_prefs";
     private static final String KEY_TIER = "model_tier";
     /** 「启用 OCR 服务」开关。默认 true —— 老用户升级后行为不变。 */
     private static final String KEY_ENABLED = "ocr_enabled";
+    /**
+     * 是否把本应用从「最近任务」列表里隐藏。
+     *
+     * 只影响多任务界面里的那张卡片；服务、通知、手势一律照旧。
+     * 默认 false —— 老用户升级后行为和以前完全一样。
+     */
+    private static final String KEY_HIDE_RECENTS = "hide_from_recents";
 
     // ===================== 总开关 =====================
     //
@@ -401,7 +408,6 @@ private static final String PREFS = "xsocr_prefs";
                 .edit().putBoolean(KEY_ENABLED, on).apply();
         if (!on) stop(c);
     }
-
     /** 主动停止服务（关闭开关时用）。 */
     public static void stop(Context c) {
         try {
@@ -411,6 +417,83 @@ private static final String PREFS = "xsocr_prefs";
         }
     }
 
+    /**
+     * 本应用当前是否从「最近任务」里隐藏。
+     *
+     * 默认 false：这个开关是后加的，老用户 prefs 里没这个键，
+     * 默认不隐藏，行为跟以前一致。
+     */
+    public static boolean isHiddenFromRecents(Context c) {
+        return c.getApplicationContext()
+                .getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_HIDE_RECENTS, false);
+    }
+
+    /** 只写设置值，不动界面 —— 具体应用交给 {@link #applyRecents(Context)}。 */
+    public static void setHiddenFromRecents(Context c, boolean hidden) {
+        c.getApplicationContext()
+                .getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit().putBoolean(KEY_HIDE_RECENTS, hidden).apply();
+    }
+
+    /**
+     * 把「从最近任务隐藏」应用到本应用的 task 上。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【为什么用 AppTask，而不是重建 task】
+     * ════════════════════════════════════════════════════════════
+     * 最初走的是「重建 task」：拿一个带
+     * FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS 的 Intent 把 Activity 重开一遍，
+     * 指望新 task 记下这个标志。
+     *
+     * 实测（MIUI / Android 14）行不通：重建时系统会**复用已存在的那个
+     * task**（task id 没变），而 task 的 baseIntent 在它首次创建时就定下了，
+     * 后到的标志被直接丢掉。日志里那句「重建 task」确实打了，可 dumpsys
+     * 一看 flags 还是 0x10000000，排除位根本不在。
+     *
+     * 真正对口的 API 是 {@link android.app.ActivityManager.AppTask}：
+     * 从 getAppTasks() 拿到本应用的 task，直接
+     * {@code setExcludeFromRecents(true/false)} —— 就地改，立即生效，
+     * 既不用重建、也就没有「标志丢失」这一说。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【为什么遍历全部 task】
+     * ════════════════════════════════════════════════════════════
+     * getAppTasks() 返回的是**本应用**的全部 task，可能不止一个
+     * （比如从通知、快捷方式各拉起过一个）。隐藏与否是针对整个应用的
+     * 观感，统一设成同一个值才不会有「藏了一个、冒出另一个」。
+     *
+     * 单个 task 设置失败不影响其余：某些 ROM 对非前台 task 可能拒绝，
+     * 所以每个都单独 try，失败只记日志。
+     */
+    public static void applyRecents(Context ctx) {
+        if (ctx == null) return;
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.LOLLIPOP) {
+            return;
+        }
+        try {
+            boolean hidden = isHiddenFromRecents(ctx);
+            android.app.ActivityManager am = (android.app.ActivityManager)
+                    ctx.getApplicationContext().getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return;
+            java.util.List<android.app.ActivityManager.AppTask> tasks = am.getAppTasks();
+            if (tasks == null || tasks.isEmpty()) return;
+            int okCount = 0;
+            for (android.app.ActivityManager.AppTask t : tasks) {
+                if (t == null) continue;
+                try {
+                    t.setExcludeFromRecents(hidden);
+                    ++okCount;
+                } catch (Throwable e) {
+                    Log.w(TAG, "单个 task 设置失败: " + e);
+                }
+            }
+            Log.i(TAG, "已" + (hidden ? "隐藏" : "恢复") + " " + okCount + "/" + tasks.size()
+                    + " 个 task 在最近任务中的显示");
+        } catch (Throwable t) {
+            Log.w(TAG, "设置最近任务可见性失败: " + t);
+        }
+    }
 
     // ===================== 统一识别入口 =====================
 

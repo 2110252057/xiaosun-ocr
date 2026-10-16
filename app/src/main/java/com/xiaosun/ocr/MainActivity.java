@@ -118,6 +118,13 @@ public class MainActivity extends AppCompatActivity {
     private View batteryCard;
     private boolean serviceStarting = false;
     /**
+     * 初始化 Switch 期间抑制回调。
+     *
+     * setChecked() 本身就会触发一次 OnCheckedChangeListener，
+     * 若不管它，打开设置页的瞬间就会平白重建一次 task。
+     */
+    private boolean suppressRecentsToggle = false;
+    /**
      * 「手势正在启动…」状态的重试计数与开关。
      *
      * 服务的 gsRunning 是在 onStartCommand（主线程）里翻的，
@@ -162,6 +169,10 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // 把「从最近任务隐藏」对齐到设置值。
+        // AppTask.setExcludeFromRecents 是就地生效的，不会重建界面。
+        OCRService.applyRecents(this);
+
         requestPermissionsIfNeeded();
 
         LinearLayout root = new LinearLayout(this);
@@ -201,6 +212,9 @@ public class MainActivity extends AppCompatActivity {
          * sync() 会按总开关决定起还是停，是幂等的。
          */
         EdgeGestureService.sync(this);
+        // 回前台时对齐一次「从最近任务隐藏」：可能是别的入口改了设置，
+        // 也可能系统重建过 task，重设一遍最稳（值相同时是空操作）。
+        OCRService.applyRecents(this);
         // 从手势设置页返回、或刚被划掉后重新进来时，开关/权限/运行状态可能都变了。
         refreshGestureState();
     }
@@ -868,6 +882,67 @@ public class MainActivity extends AppCompatActivity {
         return card;
     }
 
+    /**
+     * 「从最近任务隐藏」开关。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【这个开关在干什么】
+     * ════════════════════════════════════════════════════════════
+     * 打开后，多任务（最近任务）界面里看不到本应用这张卡片。
+     * 适合「平时只用手势触发、不想让它占着多任务」的用法。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【不影响什么】
+     * ════════════════════════════════════════════════════════════
+     *  · 前台服务照常运行，通知照常在；
+     *  · 边缘滑动手势照常可用；
+     *  · 只是多任务里那张卡片没了，想进来从桌面图标点。
+     */
+    private View buildHideRecentsCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
+        card.setPadding(dp(16), dp(12), dp(16), dp(12));
+        card.setElevation(dp(1));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText("从最近任务隐藏");
+        t.setTextSize(14f);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+        TextView sub = new TextView(this);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(C_HINT);
+        sub.setLineSpacing(0f, 1.35f);
+        sub.setText("开启后多任务界面里不显示本应用。\n"
+                + "服务与手势不受影响，从桌面图标照常进入。");
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sl.topMargin = dp(4);
+        col.addView(sub, sl);
+        card.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        android.widget.Switch sw = new android.widget.Switch(this);
+        suppressRecentsToggle = true;
+        sw.setChecked(OCRService.isHiddenFromRecents(this));
+        suppressRecentsToggle = false;
+        sw.setOnCheckedChangeListener((b, checked) -> {
+            if (suppressRecentsToggle) return;   // 初始化时别误触发
+            OCRService.setHiddenFromRecents(this, checked);
+            // 就地生效，界面不重载：切到多任务立刻就能看到结果。
+            OCRService.applyRecents(this);
+            toast(checked ? "已从最近任务隐藏" : "已恢复显示在最近任务");
+        });
+        card.addView(sw);
+        return card;
+    }
+
+
 
 
 
@@ -938,6 +1013,9 @@ public class MainActivity extends AppCompatActivity {
                 v -> requestIgnoreBatteryOptimizations()), weightLp());
         keepRow.addView(secondaryButton("应用设置", v -> openAppSettings()), weightLp());
         parent.addView(keepRow);
+
+        // ---------- 从最近任务隐藏 ----------
+        addCard(parent, buildHideRecentsCard());
 
         // ---------- 截屏识别 ----------
         addSectionTitle(parent, "屏幕截屏识别");

@@ -29,7 +29,7 @@ import android.util.Log;
  *   ic_launcher            取本应用资源（先 drawable 再 mipmap）
  *
  * 传空串或 null 一律返回 null，调用方按「没有图标」处理
- * （悬浮窗会用文字首字顶着，设置页会画一个占位方块）。
+ * （悬浮窗会用文字前两个字顶着，设置页画的是一个占位方块）。
  */
 final class MenuIcons {
 
@@ -88,7 +88,7 @@ final class MenuIcons {
      * 给 source 一个人类可读的说明，用在编辑页的提示里。
      */
     static String describeSource(String source) {
-        if (source == null || source.trim().length() == 0) return "无图标（显示文字首字）";
+        if (source == null || source.trim().length() == 0) return "无图标（显示文字前两个字）";
         String s = source.trim();
         if (s.startsWith("app:")) return "应用图标：" + s.substring(4).trim();
         if (s.startsWith("file:")) return "图片文件：" + s.substring(5).trim();

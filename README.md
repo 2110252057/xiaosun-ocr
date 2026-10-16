@@ -4,7 +4,7 @@
 
 支持**三种截屏识别**（无障碍 / root / 录屏授权，自动挑选）、图片文件识别，
 提供本地 HTTP 接口与 **MacroDroid / Tasker 插件**能力，
-并内置**边缘滑动手势触发器**（含跟手滑出菜单），方便接入自动化流程。
+并内置**边缘滑动手势触发器**（含跟手滑出菜单），支持**从最近任务隐藏**，方便接入自动化流程。
 
 ## 一、技术构成
 
@@ -353,7 +353,7 @@ Android 11（API 30）给无障碍服务开了 `takeScreenshot()`。用户只需
 |---|---|
 | 名字 | 按钮上显示的文字，必填 |
 | 动作值 | 回传给宏的 `%xsocr_menu_action`；留空则与名字相同 |
-| 图标 | `app:包名` / `file:路径` / 资源名，留空用名字首字顶着 |
+| 图标 | `app:包名` / `file:路径` / 资源名，留空则显示名字前两个字 |
 
 > **动作值为什么要单独一栏**：名字是给人看的、动作值是给宏比的。
 > 按钮可以叫「微信」而动作值叫 `wechat`，宏里的判断比按序号好读得多。
@@ -361,6 +361,10 @@ Android 11（API 30）给无障碍服务开了 `takeScreenshot()`。用户只需
 **排列方式**：图标沿 45° 斜线从左下排到右上，**每排各自居中**；
 一排排满就在上方另起一排（每排数量可逐排单独设置）。
 从触发位置弹出，出屏时先平移圆心再整体等比缩小。
+
+> **菜单项没填图标时**：用名字的**前两个字**顶着（名字本来就只有一个字，就显示一个字），
+> 字号会自动收窄一点。只取一个字（早先的行为）认不出来 ——
+> 「微」「设」这种完全看不出是哪个应用。设置页的缩略图预览与实际绘制**共用同一套规则**。
 
 ### 为什么菜单必须由本应用弹
 
@@ -432,3 +436,39 @@ bash ./gradlew assembleDebug --console=plain
 > 注意：从最近任务划掉 App 时，本服务**不会**随之停止 —— 服务在 Manifest 中声明了
 > `android:stopWithTask="false"`，正是为了让外部自动化脚本的调用不因清理后台而中断。
 > 如需彻底停止，请在系统设置中「强行停止」应用，或调用系统停止服务接口。
+
+## 九、从最近任务隐藏
+
+「OCR设置」页有一张开关卡：**从最近任务隐藏**（默认关）。
+
+开启后，多任务界面里不再出现本应用的卡片，但**服务照跑、手势照用**，
+从桌面图标照常进入。
+
+### 为什么不用 Intent 标志
+
+这是踩过一圈坑的地方，记下来免得重走：
+
+| 方案 | 结果 |
+|---|---|
+| `Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS` | ❌ 只在 task **首次创建**时记进 `baseIntent`，之后补的标志会被丢掉 |
+| `TaskDescription` 里的 `excludeFromRecents` | ❌ 该类**根本没有**这个字段（`ActivityManager$TaskDescription` 无此 API） |
+| 带标志**重建** task | ❌ 系统会**复用已存在的 task**（task id 不变），后到的标志同样被丢 |
+| **`ActivityManager.AppTask.setExcludeFromRecents()`** | ✅ 就地改、立即生效、无需重建 |
+
+正确做法是拿到本应用的 task 列表逐个设（API 21+）：
+
+```java
+ActivityManager am =
+        (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+for (ActivityManager.AppTask t : am.getAppTasks()) {
+    t.setExcludeFromRecents(hidden);   // hidden = 是否隐藏
+}
+```
+
+设置值存在 `xsocr_prefs` 的 `hide_from_recents`（默认 `false`，老用户行为不变）；
+`MainActivity` 在 `onCreate` / `onResume` 各对齐一次，拨开关时**当场生效**
+（不用切出去再进来）。
+
+> 与第八节末尾那条「划掉 App 服务也不停」**不冲突**：那条说的是
+> `android:stopWithTask="false"`，管的是**服务存活**；
+> 这个开关管的是**卡片显不显示**。两件事，可以同时要。
