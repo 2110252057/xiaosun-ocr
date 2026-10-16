@@ -478,7 +478,7 @@ for (String key : vars.keySet()) {
 
 ⚠️ **本项目踩过的坑**：`PluginConditionReceiver` 原先只调 `setResultCode(16/17/18)`，
 一个变量都没回。结果就是「动作能拿到变量，事件触发器里变量全是空的」——
-宏确实被触发了，但 `%xsocr_gs_direction` 之类全是空值。
+宏确实被触发了，但 `%xsocr_menu_index` 之类全是空值。
 
 **事件链路的正确写法**（参照 AutoInput，`com.joaomgcd.autoinput`）：
 
@@ -563,14 +563,23 @@ public static final String VAR_Y     = "%xsocr_y";   // 整数
 public static final String VAR_ERROR = "%xsocr_error";
 public static final String VAR_TIME  = "%xsocr_time";
 public static final String VAR_TIER  = "%xsocr_tier";
-// 边缘滑动手势（见 7.4）
-public static final String VAR_GS_DIRECTION     = "%xsocr_gs_direction";
-public static final String VAR_GS_DIRECTION_CN  = "%xsocr_gs_direction_cn";
-public static final String VAR_GS_HANDLE        = "%xsocr_gs_handle";
-public static final String VAR_GS_EVENT         = "%xsocr_gs_event";
-public static final String VAR_GS_SEQ           = "%xsocr_gs_seq";
-public static final String VAR_GS_TIME          = "%xsocr_gs_time";
+// 滑动菜单（触发器路径，见 7.4 / 7.6）
+public static final String VAR_MENU_INDEX  = "%xsocr_menu_index";   // 整数
+public static final String VAR_MENU_TEXT   = "%xsocr_menu_text";
+public static final String VAR_MENU_ACTION = "%xsocr_menu_action";
 ```
+
+> **曾经有 6 个手势变量，现已全部撤除**：
+> `%xsocr_gs_direction` / `_direction_cn` / `_handle` / `_event` / `_seq` / `_time`。
+>
+> 撤除理由：**方向匹配已经由插件在内部完成**。宏能跑起来，就说明这次手势
+> 的方向正是宏里配的那个 —— 再回传一遍方向纯属冗余。其余四项（手柄名、
+> 事件类型、序号、时间戳）都是排查用的调试信息，用户早在 MacroDroid 里
+> 自己建变量接值、名字由自己定，插件不该替他决定。
+>
+> 只留菜单三项，因为「用户点了哪一项」**只有插件知道**。
+> 判定逻辑（`EdgeGesturePrefs.gsLastDirection` 等字段）仍在内部保留，
+> 但不再对外暴露。
 ### 7.2 声明（三段式）
 ```java
 public static final String[] ALL_VARIABLES = {
@@ -581,14 +590,17 @@ public static final String[] ALL_VARIABLES = {
     VAR_ERROR + "\n错误信息\n失败时才有内容",
     VAR_TIME  + "\n耗时(ms)\n本次识别耗时",
     VAR_TIER  + "\n模型档位\ntiny / small / rapid",
-    VAR_GS_DIRECTION    + "\n手势方向\n边缘滑动方向：left / right / up / down 等",
-    VAR_GS_DIRECTION_CN + "\n手势方向(中文)\n向左 / 向右 / 向上 等",
-    VAR_GS_HANDLE       + "\n触发手柄\n发起手势的滑动手柄名称",
-    VAR_GS_EVENT        + "\n手势事件\ntrigger / start / cancel",
-    VAR_GS_SEQ          + "\n手势序号\n每触发一次加 1，可用于去重",
-    VAR_GS_TIME         + "\n手势时间\n手势触发的毫秒时间戳",
+    VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始；-1 = 取消或未启用菜单）",
+    VAR_MENU_TEXT   + "\n菜单文字\n选中项的显示文字（取消时为空）",
+    VAR_MENU_ACTION + "\n菜单动作\n选中项的动作串（取消时为空）",
 };
 ```
+
+> ⚠️ **动作路径与触发器路径的变量清单是两份**，不是一个数组：
+> `ALL_VARIABLES`（识别 7 项）给「动作」身份用，
+> `MENU_VARIABLES`（菜单 3 项）给「事件」身份用。
+> 触发器场景里根本没有 OCR 识别，把识别文本 / 坐标列出来
+> 只会让人以为配个手势还要填图片路径。
 
 ### 7.3 回传（含整数变量）
 
@@ -607,45 +619,52 @@ vars.putString(VAR_TIER, tier);
 
 ### 7.4 把「边缘滑动手势」接进插件
 
-手势由 `EdgeGestureService`（悬浮窗）产生。它**不对外发独立广播**，
-只做两件事：① 按事件插件协议向宿主发一条 `REQUEST_QUERY`（见 7.5）；
-② 在进程内写下一组 volatile 静态字段，供插件路径零 IPC 取用：
+手势由 `EdgeGestureService`（悬浮窗）产生。它**不对外发独立广播**，只做两件事：
 
-```
-（历史上曾发过 action = com.xiaosun.ocr.action.EDGE_GESTURE 的隐式广播，
-  携带 direction / handle / event / seq，现已整体撤除，见下方说明。）
-```
-
-同一条事件在进程内还会写进 `EdgeGesturePrefs` 的一组 volatile 静态字段
-（`gsLastDirection` / `gsLastHandle` / `gsSeq` …），因此插件路径可以零 IPC 取到它：
+1. 按事件插件协议向宿主发一条 `REQUEST_QUERY`（见 7.5），**只发这一条**；
+2. 在进程内写下一组 volatile 静态字段，供应答路径零 IPC 取用：
 
 ```java
-private void stashGestureVars(Bundle vars) {
-    vars.putString(VAR_GS_DIRECTION,    EdgeGesturePrefs.gsLastDirection);
-    vars.putString(VAR_GS_DIRECTION_CN, EdgeGesturePrefs.gsLastDirectionLabel);
-    vars.putString(VAR_GS_HANDLE,       EdgeGesturePrefs.gsLastHandle);
-    vars.putString(VAR_GS_EVENT,        EdgeGesturePrefs.gsLastEvent);
-    vars.putString(VAR_GS_SEQ,          String.valueOf(EdgeGesturePrefs.gsSeq));
-    vars.putString(VAR_GS_TIME,         String.valueOf(EdgeGesturePrefs.gsLastAt));
-}
+// EdgeGesturePrefs —— 供 PluginConditionReceiver 读取的历史快照
+public static volatile String gsLastDirection = "";      // left / right / ...
+public static volatile String gsLastDirectionLabel = ""; // 向左 / 向右 / ...
+public static volatile String gsLastHandle = "";         // 手柄名
+public static volatile String gsLastEvent = "";          // trigger / start / cancel
+public static volatile int    gsSeq = 0;                 // 每触发一次 +1
+public static volatile long   gsLastAt = 0L;             // 毫秒时间戳
+// 菜单结果
+public static volatile int    menuIndex = -1;            // -1 = 取消
+public static volatile String menuText = "";
+public static volatile String menuAction = "";
 ```
 
-调用点在 `PluginFireReceiver.doWork()` 开头 —— **必须在耗时的 OCR 之前取快照**，
-否则识别过程中用户又滑了一次，回传的就会串成后一次的手势。
+> ⚠️ 早期版本曾在 `PluginFireReceiver.stashGestureVars()` 里把这些字段
+> 打包回传（`%xsocr_gs_*` 六个变量）。**那套已整体撤除**，
+> 原因见 7.1 的说明。现在这些字段**仅供内部方向匹配使用**，不再对外暴露。
+
+**方向匹配在哪里做**：不在宏里，也不在本应用里 —— 在**插件的应答路径**上。
+宿主发 `QUERY_CONDITION` 问「手势成立吗」，`PluginConditionReceiver` 拿配置里
+定的期望方向与 `EdgeGesturePrefs.gsLastDirection` 比对：
+
+| 比对结果 | 回应 | 宏的行为 |
+|---|---|---|
+| 匹配 | `setResultCode(16)` + 回传菜单变量 | **跑** |
+| 不匹配 | `setResultCode(17)` | **不跑**（宿主视为条件不成立） |
+| 防伪校验失败 | `setResultCode(18)` | 安静跳过 |
 
 于是宏只有一条可用路径：
 
 | 路径 | 配置方式 | 拿得到什么 |
 |---|---|---|
-| 插件（唯一） | 触发器 → 「小孙OCR · 边缘滑动事件」 | 识别结果 **+** 本次手势变量 |
+| 插件（唯一） | 触发器 → 「小孙OCR · 边缘滑动事件」 | **菜单三项变量** |
 
-判断「这次到底是不是滑动触发的」：对比 `%xsocr_gs_seq` 有没有变化即可。
+因为「不匹配就不回应」，宏里**不需要再判断方向** —— 能被触发，
+就说明方向已经对上了。
 
 > 曾经的「广播」旁路（`com.xiaosun.ocr.action.EDGE_GESTURE`）已撤除：
 > 它每次滑动都往系统里扔一条人人可收的隐式广播，既多一次跨进程唤醒，
 > 又不带任何防伪信息 —— 谁都能照着抄一条来骗过监听方的宏。
 > 插件通道能直接回传变量，已覆盖全部用法。
-> 手势上下文的对外传递现在只走 `stashGestureVars()` 这一条路。
 
 ### 7.5 ★ 让插件出现在「触发器」列表里（事件协议）
 
@@ -735,7 +754,7 @@ sendBroadcast(i);                              // ★ 不能 setPackage，宿主
 
 事件触发器**不经过** `FIRE_SETTING`，所以 `PluginFireReceiver` 里那套
 变量回传**在这条链路上根本不会执行**。宏确实会被触发，但里面
-`%xsocr_gs_direction`、`%xsocr_menu_index` 全是空的。
+`%xsocr_menu_index` / `%xsocr_menu_text` / `%xsocr_menu_action` 全是空的。
 
 必须在应答时自己把变量送回宿主（详见 6.1 与 `PluginConditionReceiver.answer()`）：
 
@@ -827,11 +846,14 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 
 #### 配置（全在本应用里，宏不用管）
 
-设置 → 边缘滑动触发 → **滑动菜单**：
+**滑动触发** 页 → **滑动菜单**：
 
 - **启用开关**：关 = 滑过距离立即触发宏（老行为）；开 = 弹出菜单。
-- **图标大小 / 显示文字 / 布局**（底部横排、环形）。
-- **菜单项列表**：添加、改名、选图标、调顺序、删除。
+- **外观**：图标大小、显示文字、文字大小、文字间距、浅色圆底。
+- **布局**：每排数量、逐排数量、图标间距、每排间距。
+- **配色**：圆底 / 文字 / 选中色，支持 `#RGB`、`#ARGB`、`#RRGGBB`、`#AARRGGBB`。
+- **热区大小**：命中半径 = 图标半径 × 倍率（100%~300%），下方带感应范围预览。
+- **菜单项列表**：双列网格；点按编辑，长按出「上移 / 下移 / 编辑内容 / 删除」。
 
 每一项有三个字段：
 
@@ -854,9 +876,12 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 ```
 
 > 注：本应用 `targetSdk 34`，受包可见性（package visibility）限制，
-> 界面里**没有**「从已装应用里挑一个」的列表 —— 那需要声明
-> `QUERY_ALL_PACKAGES`，只为取个图标不值当。
-> 直接填包名即可，编辑框旁边有实时预览，打错一个字母立刻能看出来。
+> `getApplicationIcon(pkg)` 对**未声明过**的包会抛 `NameNotFoundException`，
+> 表现为「填了 app:包名 但图标是空的」。
+> 本应用已在 `AndroidManifest.xml` 里同时声明了 `QUERY_ALL_PACKAGES`
+> 与 `<queries>`（MAIN/LAUNCHER + 常见目标应用直接点名），两条路任一生效即可。
+> 界面里仍**没有**「从已装应用里挑一个」的列表 —— 直接填包名即可，
+> 编辑框旁边有实时预览，打错一个字母立刻能看出来。
 
 #### 回传的变量
 
@@ -896,6 +921,22 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 - **命中框比圆大**：命中框要抱住图标下方的文字（落在文字上也算选中），
   但要按图标直径画**真正的圆**，别拿命中框画圆角矩形，
   否则会变成胶囊状，看着像进度条。
+- **命中判定用极坐标，不要用矩形相交**：早期用 `Rect.contains()` 判定，
+  相邻图标（cell 216px、命中框 246px）的框会互相重叠，
+  导致「点在 B 上却选中 A」。改成「角向半槽角 + 径向双重限制」后才准确。
+- **绘制圆心 = 判定圆心**：让 `menuRects` 的矩形严格等于图标外接正方形
+  （边长 = 图标直径），三者同心，否则会出现「高亮圈和图标差半个身位」。
+- **每排要各自居中**：`x = c * sp * dirX + r * rowGap * offX` 这种写法
+  会让每排**左端对齐在同一条斜线上**，项数一变就歪成三角。
+  正确写法是减去本排中点偏移：
+  ```java
+  float u = (c - (cnt[r] - 1) * 0.5f) * sp;   // c = 本排内第几项
+  float x = u * dirX + r * rowGap * offX;
+  float y = u * dirY + r * rowGap * offY;
+  ```
+- **菜单锚点要用屏幕坐标**：展开瞬间窗口刚提交「变全屏」、View 还没重新布局，
+  此时 `getX()` 是相对手柄那条窄条的坐标，换算出来会落在屏幕左上角。
+  必须存 `getRawX()/getRawY()`，排版时再用 `getLocationOnScreen()` 转回 View 坐标。
 
 ---
 
@@ -920,10 +961,15 @@ intent.putExtra("net.dinglisch.android.tasker.extras.PASS_THROUGH_DATA", data);
 | 改代码后 | **必须重新配置插件动作** |
 | 变量值类型 | 最终统一转成字符串，但 `putInt` 更规范 |
 | 后台限制 | 广播后 10 秒豁免窗口；悬浮窗权限可解除 |
-| 手势取快照 | 在 `doWork()` 开头取，别放在耗时 OCR 之后 |
+| 手势方向匹配 | 在 `PluginConditionReceiver` 里比对，**不匹配回 17**，宏不跑 |
+| **手势变量（gs_*）** | **已全部撤除**，只做内部匹配用，不对外回传 |
 | **菜单在哪配** | 本应用设置页（`EdgeGestureMenuActivity`），宏不参与 |
-| **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_action`，**-1 = 取消** |
+| **菜单结果回传** | `%xsocr_menu_index` / `%xsocr_menu_text` / `%xsocr_menu_action`，**-1 = 取消** |
 | **跟手菜单前提** | 菜单必须由拿住触摸的那个窗口弹，宏弹不了 |
+| **菜单窗口变形** | 只能 `updateViewLayout()` 原地长大，`removeView()+addView()` 会收到 ACTION_CANCEL，手势当场中断 |
+| **截屏方式（三条）** | 无障碍（免授权，API 30+）→ root → MediaProjection，自动挑选 |
+| **无障碍截图能力** | `CAPABILITY_CAN_TAKE_SCREENSHOT` + `takeScreenshot()`，同为 API 30 |
+| **无障碍服务隐私** | 不声明 `accessibilityEventTypes`，`onAccessibilityEvent` 空实现 |
 
 ---
 
