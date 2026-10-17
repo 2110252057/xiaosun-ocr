@@ -83,12 +83,24 @@ import java.util.regex.Pattern;
  * 在 android.jar 里就有，**零新增依赖**，静态编译即可验证。
  *
  * ════════════════════════════════════════════════════════════════
- * 二、识别为什么不用 OCRService
+ * 二、识别为什么必须走 OCRService（跟随主界面设置的档位）
  * ════════════════════════════════════════════════════════════════
- * {@link OCRService#onBind} 返回 null（它不接受 bind），也没有单例字段，
- * 界面拿不到它的实例；而 {@link MlKitEngine} 是包内可见类，本页与它同包，
- * 直接 new 一个即可。模型是 bundled 版（不联网、不依赖 Play 服务），
- * 代价只是多一份识别器实例的内存，退出本页即 close。
+ * 【曾经的做法及其问题】这里原来自己 new 一个 {@link MlKitEngine}，
+ * 也就是「本页永远用 ML Kit」。可主界面是有档位设置（tiny / small /
+ * rapid）的，用户选了 small（native PP-OCRv6，识别率明显更高）之后，
+ * 这一页却还在用 ML Kit 出结果 —— 设置等于被无视。
+ *
+ * 【为什么不能自建一份 native 引擎】libnjocr.so 里的 det_net、rec_net、
+ * is_loaded、g_lock 全是**进程级静态变量**，整个进程只存在一套模型：
+ * 自建第二份根本做不到，重复 initModels 还会把服务正在用的模型顶掉。
+ *
+ * 【所以】统一走 {@link OCRService#processBitmap}，它在内部按 currentTier
+ * 分流（tiny/small → native，rapid → ML Kit）。设置里选什么，这里就用什么。
+ * 服务实例由 {@link OCRService#get()} 提供（onBind 返回 null，所以服务
+ * 在 onCreate/onDestroy 里挂/摘一个静态引用）。
+ *
+ * 【代价】OCR 服务未启用时本页不能识别，状态栏会直接说明原因
+ * （「启用 OCR 服务已关闭」/「模型仍在加载中」），不会静默退回 ML Kit。
  *
  * ════════════════════════════════════════════════════════════════
  * 三、为什么不是「一直以帧率识别」
@@ -236,7 +248,22 @@ public class CameraOcrActivity extends AppCompatActivity {
     // ============================================================
     //  状态
     // ============================================================
-    private volatile MlKitEngine engine;
+    /**
+     * 识别是否统一走 {@link OCRService#processBitmap}。
+     *
+     * 【为什么不再自建引擎】原来这里持有 `volatile MlKitEngine engine`，
+     * 也就是「摄像头页永远用 ML Kit」——跟主界面设置的档位完全无关。
+     * 但用户选了 small（native PP-OCRv6，识别率高得多），这一页却还在用
+     * ML Kit 出结果，等于设置被无视。
+     *
+     * 而且 native 引擎根本没法在界面里单独建一份：libnjocr.so 里的
+     * det_net / rec_net / is_loaded / g_lock 全是**进程级静态变量**，
+     * 整个进程只有一套模型。所以这页必须借 OCRService 那一份用，
+     * 顺带就自动跟随了档位。
+     *
+     * 代价：OCR 服务没启用时这一页不能识别（会在状态栏说明原因）。
+     * 这个代价是用户认可的 —— 「启用 OCR 以后才能用也没关系」。
+     */
     /**
      * 界面是否被「相册识别结果」钉住。
      *
@@ -291,7 +318,42 @@ public class CameraOcrActivity extends AppCompatActivity {
         setContentView(rootLayout);
 
         textureView.setSurfaceTextureListener(surfaceListener);
+        ensureService();
         AppLog.i(TAG, "摄像头实时识别页已打开");
+    }
+
+    /**
+     * 确保 OCR 服务在跑 —— 本页的识别完全依赖它。
+     *
+     * 【为什么要主动拉】用户可能从桌面快捷方式/最近任务直接进到这一页，
+     * 而服务的拉起原本只在 {@code MainActivity.ensureServiceRunning()} 里做。
+     * 不拉的话这一页会一直显示「OCR 服务未启动」，看上去像坏了。
+     *
+     * 【为什么不在开关关闭时也硬拉】那个开关是用户明确关掉的
+     * （只想用手势、不想扛前台通知和模型内存），硬拉等于推翻他的选择。
+     * 所以开关关闭时只在状态栏说清楚，不启动。
+     */
+    private void ensureService() {
+        if (OCRService.get() != null) {
+            return;
+        }
+        if (!OCRService.isEnabled(this)) {
+            setStatus("「启用 OCR 服务」已关闭，本页无法识别", true);
+            return;
+        }
+        try {
+            Intent intent = new Intent(this, OCRService.class);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+            setStatus("正在启动 OCR 服务…", false);
+            AppLog.i(TAG, "OCR 服务未运行，已在本页拉起");
+        } catch (Throwable t) {
+            AppLog.w(TAG, "拉起 OCR 服务失败: " + t);
+            setStatus("OCR 服务启动失败：" + t.getClass().getSimpleName(), true);
+        }
     }
 
     @Override
@@ -347,20 +409,8 @@ public class CameraOcrActivity extends AppCompatActivity {
         if (!galleryBusy) {
             hideGalleryImage();
         }
-        final MlKitEngine e = engine;
-        engine = null;
-        if (e != null) {
-            ocrHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        e.close();
-                    } catch (Throwable ignore) {
-                        // 关识别器失败不影响退出
-                    }
-                }
-            });
-        }
+        // 【不要动引擎】识别走的是 OCRService 那份共享实例，
+        // 在这里 close 会把整个 App 的识别能力一起关掉（服务也再要一遍模型）。
         ocrThread.quitSafely();
         bgThread.quitSafely();
         AppLog.i(TAG, "摄像头实时识别页已关闭");
@@ -755,12 +805,6 @@ public class CameraOcrActivity extends AppCompatActivity {
         }
 
         Bitmap upright = toUpright(bmp);
-        MlKitEngine eng = engine;
-        if (eng == null) {
-            eng = new MlKitEngine();
-            eng.init();
-            engine = eng;
-        }
 
         String raw = "";
         String err = null;
@@ -768,7 +812,7 @@ public class CameraOcrActivity extends AppCompatActivity {
             // 顺序很重要：先清错误位、再 recognize、再 parse，最后才读错误位。
             // 之前写成「recognize 后立刻读」会把 parseTexts 里记下的错误吞掉，
             // 表现为识别失败时界面只是「没识别到数字」，查不到真正原因。
-            String json = eng.recognize(upright, 1);
+            String json = recognizeJson(upright, 1);
             lastError = null;
             String parsed = parseTexts(json);
             String parseErr = lastError;
@@ -793,6 +837,49 @@ public class CameraOcrActivity extends AppCompatActivity {
         final String error = err;
         onResult(text, cost, error);
         finishShot();
+    }
+
+    /**
+     * 统一识别出口：把位图交给 {@link OCRService#processBitmap}，
+     * 用**主界面设置的那个档位**来识别。
+     *
+     * 【为什么是它】processBitmap 内部已经按 currentTier 分流：
+     *   tiny / small → native PP-OCRv6（libnjocr.so 里那套模型）
+     *   rapid        → MlKitEngine（ML Kit）
+     * 也就是说「设置里选了什么，这里就用什么」，不需要在这一页再判断一次。
+     *
+     * 【为什么不自己 new 引擎】native 侧是进程级单例（.so 里的静态
+     * det_net / rec_net / is_loaded），自建第二份既做不到、也没有意义；
+     * 重复 initModels 还会把服务正在用的模型顶掉。
+     *
+     * 服务不可用时返回与 native 同构的错误 JSON（status=503），
+     * 让上层 parseTexts / parseLines 走既有错误分支，不必各写一套。
+     *
+     * @param bmp  待识别位图（生命周期由调用方负责）
+     * @param type 1=纯文本；>=2 含坐标
+     * @return 与 native 格式一致的 JSON（**绝不返回 null**）
+     */
+    private String recognizeJson(Bitmap bmp, int type) {
+        OCRService svc = OCRService.get();
+        if (svc == null) {
+            String why = OCRService.isEnabled(this)
+                    ? "OCR 服务未启动，请回到主界面稍候，或检查「启用 OCR 服务」开关"
+                    : "「启用 OCR 服务」已关闭，本页无法识别";
+            return "{\"status\": 503, \"data\": \"Error: " + why + "\"}";
+        }
+        if (!OCRService.engineReady()) {
+            String why = OCRService.engineBlockReason();
+            if (why == null || why.isEmpty()) {
+                why = "模型仍在加载中";
+            }
+            return "{\"status\": 503, \"data\": \"Error: " + why + "\"}";
+        }
+        try {
+            return svc.processBitmap(bmp, type);
+        } catch (Throwable t) {
+            AppLog.w(TAG, "识别调用失败: " + t);
+            return "{\"status\": 500, \"data\": \"Error: " + t + "\"}";
+        }
     }
 
     /** recognize 的错误串（跨方法传值用，只在 ocrHandler 线程写、主线程读）。 */
@@ -826,6 +913,12 @@ public class CameraOcrActivity extends AppCompatActivity {
                 String meta = "共 " + countNumbers(shownText) + " 个数字 · 耗时 " + cost + " ms";
                 if (rawLines > 0) {
                     meta += " · 识别到 " + rawLines + " 行";
+                }
+                // 带上档位：换了 small / rapid 之后识别效果差别很大，
+                // 出问题时要能一眼看出「现在到底是谁在算」。
+                String tier = OCRService.tierName(OCRService.currentTier);
+                if (tier != null && !tier.isEmpty()) {
+                    meta += " · " + tier;
                 }
                 if (pendingHits > 0 && pendingHits < HITS_TO_SETTLE) {
                     meta += " · 等待稳定…";
@@ -930,20 +1023,13 @@ public class CameraOcrActivity extends AppCompatActivity {
             }
         });
 
-        MlKitEngine eng = engine;
-        if (eng == null) {
-            eng = new MlKitEngine();
-            eng.init();
-            engine = eng;
-        }
-
         List<TextLine> lines = null;
         String err = null;
         int chunks = 0;
         try {
             // chunkCount[0] 出参：实际切了几块（1 = 整张一次认出），只用于展示
             int[] chunkCount = new int[1];
-            lines = recognizeInChunks(eng, bmp, chunkCount);
+            lines = recognizeInChunks(bmp, chunkCount);
             err = lastError;
             lastError = null;
             chunks = chunkCount[0];
@@ -1061,7 +1147,7 @@ public class CameraOcrActivity extends AppCompatActivity {
      * @param chunkCount 出参：实际切了几块（1 表示没切）
      * @return 全部行（坐标已加回整图 y），失败返回 null 且 lastError 有值
      */
-    private List<TextLine> recognizeInChunks(MlKitEngine eng, Bitmap bmp, int[] chunkCount) {
+    private List<TextLine> recognizeInChunks(Bitmap bmp, int[] chunkCount) {
         int w = bmp.getWidth();
         int h = bmp.getHeight();
         List<TextLine> all = new ArrayList<>();
@@ -1070,7 +1156,7 @@ public class CameraOcrActivity extends AppCompatActivity {
         if (h <= CHUNK_H * 3 / 2) {
             chunkCount[0] = 1;
             lastError = null;
-            String json = eng.recognize(bmp, 2);
+            String json = recognizeJson(bmp, 2);
             List<TextLine> once = parseLines(json);
             if (lastError != null) {
                 return null;
@@ -1100,7 +1186,7 @@ public class CameraOcrActivity extends AppCompatActivity {
             }
             try {
                 lastError = null;
-                String json = eng.recognize(sub, 2);
+                String json = recognizeJson(sub, 2);
                 List<TextLine> part = parseLines(json);
                 if (lastError != null) {
                     return null;

@@ -253,6 +253,57 @@ public class OCRService extends Service {
     /** 当前档位，供界面与接口共用。 */
     public static volatile int currentTier = TIER_TINY;
 
+    /**
+     * 当前存活的 Service 实例（没有则为 null）。
+     *
+     * 【为什么要有这个】{@link #onBind} 返回 null —— 本服务不接受 bind。
+     * 而识别入口 {@link #processBitmap} 和 native 方法都是**实例方法**，
+     * 界面想复用同一套模型就必须拿到这个实例。
+     *
+     * 【为什么是静态引用】整个进程只有一个 OCRService（单例服务），
+     * 静态引用是安全的：onCreate 里挂上、onDestroy 里摘掉，
+     * 生命周期严格对应。用弱引用反而会让「刚启动、还没被别处强引用」时
+     * 被 GC 掉，导致界面偶发拿不到。
+     *
+     * 【为什么不改成 bindService】那要新增 AIDL/Binder、改 Manifest，
+     * 而且 bind 会让服务在界面退出后仍被系统保活，与现有
+     * 「前台服务 + 通知」这套模型重复。挂个引用是最小改动。
+     */
+    private static volatile OCRService instance;
+
+    /** 取当前服务实例；服务未启动时为 null。 */
+    public static OCRService get() {
+        return instance;
+    }
+
+    /**
+     * 引擎是否已经能被使用（界面侧判断用）。
+     *
+     * 【为什么不是直接看 modelReady】modelReady 只表示 **native** 的
+     * initModels 成功。rapid（ML Kit）档走的是另一条路，它不依赖
+     * native 模型，即使 modelReady 为 true 也不代表 ML Kit 建好了。
+     * 这里按档位分别判断，界面拿到的才是「现在真能识别」。
+     */
+    public static boolean engineReady() {
+        if (!isRunning) return false;
+        if (currentTier == TIER_RAPID) return true;
+        return modelReady;
+    }
+
+    /**
+     * 引擎尚不可用的原因（可用时为空串），供界面直接展示。
+     *
+     * 与 {@link #engineReady()} 配套：界面拿到 false 时再读这里，
+     * 就能说清是「服务没开」「模型还在加载」还是「加载失败了」。
+     */
+    public static String engineBlockReason() {
+        if (!isRunning) return "OCR 服务未启动";
+        if (currentTier == TIER_RAPID) return "";
+        if (modelReady) return "";
+        if (modelError != null && !modelError.isEmpty()) return modelError;
+        return "模型仍在加载中";
+    }
+
     /** 档位名称，用于日志与接口返回。 */
     public static String tierName(int tier) {
         switch (tier) {
@@ -752,6 +803,7 @@ private static final String PREFS = "xsocr_prefs";
         }
         Log.i(TAG, "Service Creating...");
         isRunning = true;
+        instance = this;
         startForegroundCompat();
 
         // 【修复⑥：启动顺序】先把 HTTP 服务起起来，再做重活。
@@ -974,6 +1026,11 @@ private static final String PREFS = "xsocr_prefs";
             }
         } catch (Throwable t) {
             Log.w(TAG, "关闭 ML Kit 引擎失败: " + t);
+        }
+        // 摘掉共享引用：此后界面拿到的 get() 一定是 null，
+        // 不会误用一个已经 destroy 的实例去调 native。
+        if (instance == this) {
+            instance = null;
         }
         super.onDestroy();
     }
