@@ -1133,9 +1133,9 @@ public class MainActivity extends AppCompatActivity {
         camCard.addView(camTitle);
 
         TextView camDesc = new TextView(this);
-        camDesc.setText("调起后置摄像头，连续识别画面里的数字（小票、电表、车牌都行）。"
-                + "识别在本机完成，不联网、不上传。\n"
-                + "结果只保留数字，点一下就能复制。");
+        camDesc.setText("调起后置摄像头，连续识别画面里的数字（小票、电表、车牌都行）；"
+                + "也可以点页内「相册」选一张已有图片识别。\n"
+                + "识别在本机完成，不联网、不上传。结果只保留数字，点一下就能复制。");
         camDesc.setTextSize(12f);
         camDesc.setTextColor(C_TEXT_SUB);
         camDesc.setLineSpacing(0f, 1.35f);

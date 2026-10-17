@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -22,8 +23,10 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.ExifInterface;
 import android.media.Image;
 import android.media.ImageReader;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -52,6 +55,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.regex.Matcher;
@@ -59,6 +63,9 @@ import java.util.regex.Pattern;
 
 /**
  * 摄像头实时识别页（后置摄像头 + 本地 ML Kit，只保留数字）。
+ *
+ * 除实时识别外，还提供「相册」：从文件选择器挑一张已有图片，用同一套
+ * 数字规则识别一次（详见第六节）。
  *
  * ════════════════════════════════════════════════════════════════
  * 一、为什么用 Camera2 而不是 CameraX
@@ -103,6 +110,18 @@ import java.util.regex.Pattern;
  * 手持时机身会抖，同一行数字偶尔会掉一两位，结果区就会疯狂闪烁。
  * 这里要求连续 2 次抽出的结果完全一致才更新界面（{@link #HITS_TO_SETTLE}），
  * 抖动被吃掉，真正的数字一稳住就立刻显示。
+ *
+ * ════════════════════════════════════════════════════════════════
+ * 六、相册模式（同一页里的第二条输入源）
+ * ════════════════════════════════════════════════════════════════
+ * 底部「相册」按钮走 ACTION_OPEN_DOCUMENT 选图，识别一次即出结果。
+ * 与实时识别的差别只在「输入从哪来」，数字规则完全共用：
+ *   · 走 SAF，**不需要 READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE**；
+ *   · 解码前先读尺寸算 inSampleSize（最长边 ≤ 1920），避免大图 OOM；
+ *   · 按 EXIF 方向摆正后再送识别 —— 竖拍的图像素其实是横着存的，
+ *     不摆正识别率会明显下降；
+ *   · 识别完把界面「钉住」（{@link #galleryPinned}）并暂停实时，
+ *     否则下一帧摄像头画面会立刻盖掉刚看清的结果；点「继续」恢复。
  */
 public class CameraOcrActivity extends AppCompatActivity {
 
@@ -110,6 +129,17 @@ public class CameraOcrActivity extends AppCompatActivity {
 
     /** 运行时权限请求码。 */
     private static final int REQ_CAMERA = 9101;
+
+    /** 相册选图请求码。 */
+    private static final int REQ_PICK_IMAGE = 9102;
+
+    /**
+     * 相册图解码后的最长边上限。
+     *
+     * 比摄像头那 720 宽得多：相册图是静态的、只识别一次，没有「每秒重算」
+     * 的压力，放大一点对小字（比如小票底部的一行条码数字）更有利。
+     */
+    private static final int MAX_GALLERY_SIDE = 1920;
 
     /** 连续命中多少次才认为结果稳定。 */
     private static final int HITS_TO_SETTLE = 2;
@@ -153,7 +183,26 @@ public class CameraOcrActivity extends AppCompatActivity {
     // ============================================================
     //  状态
     // ============================================================
-    private MlKitEngine engine;
+    private volatile MlKitEngine engine;
+    /**
+     * 界面是否被「相册识别结果」钉住。
+     *
+     * 选完相册图后摄像头预览还在，若不钉住，用户刚看清相册图的结果，
+     * 下一帧画面就把它覆盖掉了，等于白选。钉住时同时把 {@link #paused}
+     * 置为 true（真正停掉实时识别），点「继续」双向解除：
+     * 既清掉钉住标记、也恢复实时识别。
+     */
+    private volatile boolean galleryPinned = false;
+    /**
+     * 「相册图正在识别」窗口。
+     *
+     * onActivityResult → onResume 是固定顺序，而这时 {@link #galleryPinned}
+     * 还来不及置位（要等识别完成）。没有这个标志的话，onResume 会把
+     * paused 改回 false，实时抓帧就跟相册识别一起排队白跑一轮。
+     */
+    private volatile boolean galleryBusy = false;
+    /** 打开选图器之前是否已手动暂停，取消选图时按原样恢复。 */
+    private volatile boolean pausedBeforePick = false;
     private volatile boolean stopping = true;
     private volatile boolean paused = false;
     private volatile boolean capturing = false;
@@ -196,7 +245,12 @@ public class CameraOcrActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         stopping = false;
-        paused = false;
+        // 相册结果被钉住、或相册图正在识别时不要解除暂停：
+        // 从文件选择器返回的顺序是 onActivityResult → onResume，
+        // 若这里无条件 paused=false，会把相册模式刚设的暂停顶掉。
+        if (!galleryPinned && !galleryBusy) {
+            paused = false;
+        }
         updatePauseButton();
         if (hasCameraPermission()) {
             startPreviewIfPossible();
@@ -210,6 +264,10 @@ public class CameraOcrActivity extends AppCompatActivity {
     protected void onPause() {
         super.onPause();
         stopping = true;
+        // 离开这一页就解除「相册结果钉住」：下次进来应该是个干净的实时页，
+        // 而不是还钉着上次那张相册图、还停着识别。
+        galleryPinned = false;
+        galleryBusy = false;
         closeCamera();
     }
 
@@ -669,6 +727,11 @@ public class CameraOcrActivity extends AppCompatActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                // 相册结果被钉住时，实时帧只跑不刷界面 —— 否则用户刚看清
+                // 相册图的结果，下一秒就被摄像头画面盖掉了。
+                if (galleryPinned) {
+                    return;
+                }
                 if (error != null) {
                     setStatus("识别异常：" + error, true);
                     return;
@@ -695,6 +758,302 @@ public class CameraOcrActivity extends AppCompatActivity {
                 }
             }
         });
+    }
+
+    // ============================================================
+    //  相册选图识别
+    // ============================================================
+    /**
+     * 打开系统文件选择器挑一张图。
+     *
+     * 用 ACTION_OPEN_DOCUMENT 而不是读相册数据库：
+     *   · 走 SAF，**不需要 READ_EXTERNAL_STORAGE**（Android 13 起那个权限
+     *     已拆成 READ_MEDIA_IMAGES，适配成本高且用户嫌烦）；
+     *   · 用户能选到「下载」「云盘」「微信文件」里的图，不限于相册 App。
+     */
+    private void pickFromGallery() {
+        try {
+            // 记住当前暂停状态：用户本就在暂停，取消选图后不该被强制拉回实时。
+            pausedBeforePick = paused;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            startActivityForResult(intent, REQ_PICK_IMAGE);
+        } catch (Throwable t) {
+            toast("打不开文件选择器");
+            AppLog.w(TAG, "打开相册失败: " + t);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_IMAGE) {
+            return;
+        }
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            // 用户取消了：恢复选图前的暂停状态，不要擅自把用户拽回实时。
+            paused = pausedBeforePick;
+            updatePauseButton();
+            if (!paused) {
+                setStatus("识别中…", false);
+                scheduleShot();
+            }
+            return;
+        }
+        final Uri uri = data.getData();
+        // 选图期间（Activity 会 onPause → 相机已关）先停心跳，回来后不必
+        // 和相册识别抢同一个识别器；识别完成后由 recognizeGalleryImage 决定
+        // 是否继续保持暂停。
+        galleryBusy = true;
+        paused = true;
+        updatePauseButton();
+        setStatus("相册图片识别中…", false);
+        AppLog.i(TAG, "相册选图: " + uri);
+        ocrHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                recognizeGalleryImage(uri);
+            }
+        });
+    }
+
+    /**
+     * 识别一张相册图（在 ocrHandler 线程执行）。
+     *
+     * 为什么必须 post 到 ocrHandler：ML Kit 的 TextRecognizer 不是线程安全的，
+     * 而实时识别也在这条线程上跑。排队执行天然串行，不需要额外加锁。
+     */
+    private void recognizeGalleryImage(Uri uri) {
+        long t0 = System.currentTimeMillis();
+        Bitmap bmp = decodeGalleryBitmap(uri);
+        if (bmp == null) {
+            final String msg = "图片读取失败（文件可能已删除或格式不支持）";
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    galleryBusy = false;
+                    setStatus(msg, true);
+                    paused = false;
+                    updatePauseButton();
+                    scheduleShot();
+                }
+            });
+            return;
+        }
+
+        MlKitEngine eng = engine;
+        if (eng == null) {
+            eng = new MlKitEngine();
+            eng.init();
+            engine = eng;
+        }
+
+        String parsed = null;
+        String err = null;
+        try {
+            String json = eng.recognize(bmp, 1);
+            lastError = null;
+            parsed = parseTexts(json);
+            err = lastError;
+            lastError = null;
+        } catch (Throwable t) {
+            err = t.toString();
+        } finally {
+            try {
+                bmp.recycle();
+            } catch (Throwable ignore) {
+                // 已回收
+            }
+        }
+
+        final long cost = System.currentTimeMillis() - t0;
+        final String text = parsed == null ? "" : parsed;
+        final String error = err;
+        final String numbers = extractNumbers(text);
+        final int rawLines = text.isEmpty() ? 0 : text.split("\n").length;
+
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                galleryBusy = false;
+                if (error != null) {
+                    setStatus("相册识别失败：" + error, true);
+                    paused = false;
+                    updatePauseButton();
+                    scheduleShot();
+                    return;
+                }
+                // 钉住界面：实时帧不再覆盖这次结果
+                galleryPinned = true;
+                paused = true;
+                updatePauseButton();
+                pendingText = "";
+                pendingHits = 0;
+                shownText = numbers;
+                if (numbers.isEmpty()) {
+                    // 相册图里确实一个数字都没有时，不能说「还没识别到」——
+                    // 那会被误读成「没识别成功」。这里明确区分两种空。
+                    tvResult.setTextColor(0xFF9CA3AF);
+                    tvResult.setText(rawLines > 0
+                            ? "（这张图里有文字，但没有数字）"
+                            : "（这张图里没识别到文字）");
+                } else {
+                    renderResult();
+                }
+                StringBuilder meta = new StringBuilder("相册图片 · 共 ")
+                        .append(countNumbers(numbers)).append(" 个数字 · 耗时 ")
+                        .append(cost).append(" ms");
+                if (rawLines > 0) {
+                    meta.append(" · 识别到 ").append(rawLines).append(" 行");
+                }
+                if (tvMeta != null) {
+                    tvMeta.setText(meta.toString());
+                }
+                setStatus("相册识别完成（实时已暂停，点「继续」恢复）", false);
+                AppLog.i(TAG, "相册识别完成：" + countNumbers(numbers) + " 个数字，耗时 " + cost + "ms");
+            }
+        });
+    }
+
+    /**
+     * 解码相册图：先读尺寸算采样率，再真正解码，最后按 EXIF 摆正。
+     *
+     * 相册图动辄 4000×3000，直接 ARGB_8888 解码要 48MB，低端机上
+     * 有大概率 OOM；inSampleSize 是 2 的幂，缩到最长边 ≤ MAX_GALLERY_SIDE
+     * 就够识别了。
+     */
+    private Bitmap decodeGalleryBitmap(Uri uri) {
+        try {
+            // ① 只读尺寸
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            InputStream is = getContentResolver().openInputStream(uri);
+            if (is == null) {
+                return null;
+            }
+            try {
+                BitmapFactory.decodeStream(is, null, bounds);
+            } finally {
+                closeQuietly(is);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return null;
+            }
+            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (longest / sample > MAX_GALLERY_SIDE) {
+                sample *= 2;
+            }
+
+            // ② 真正解码（必须重新开一个流：流不可复用）
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inSampleSize = sample;
+            opt.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            InputStream is2 = getContentResolver().openInputStream(uri);
+            if (is2 == null) {
+                return null;
+            }
+            Bitmap raw;
+            try {
+                raw = BitmapFactory.decodeStream(is2, null, opt);
+            } finally {
+                closeQuietly(is2);
+            }
+            if (raw == null) {
+                return null;
+            }
+            AppLog.i(TAG, "相册图解码: " + bounds.outWidth + "x" + bounds.outHeight
+                    + " sample=" + sample + " -> " + raw.getWidth() + "x" + raw.getHeight());
+            return applyExif(raw, readExifOrientation(uri));
+        } catch (Throwable t) {
+            AppLog.w(TAG, "相册图解码失败: " + t);
+            return null;
+        }
+    }
+
+    /** 读取 EXIF 方向；读不到就当正常（0 度）。 */
+    private int readExifOrientation(Uri uri) {
+        try {
+            InputStream is = getContentResolver().openInputStream(uri);
+            if (is == null) {
+                return ExifInterface.ORIENTATION_NORMAL;
+            }
+            try {
+                ExifInterface exif = new ExifInterface(is);
+                return exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL);
+            } finally {
+                closeQuietly(is);
+            }
+        } catch (Throwable t) {
+            return ExifInterface.ORIENTATION_NORMAL;
+        }
+    }
+
+    /**
+     * 按 EXIF 方向把图摆正。
+     *
+     * 竖着拍的照片，像素其实是横着存的，只有 EXIF 记了一句「转 90 度」。
+     * 不摆正的话送给识别器的就是一整张躺倒的图，识别率会掉一大截。
+     */
+    private Bitmap applyExif(Bitmap src, int orientation) {
+        if (src == null) {
+            return null;
+        }
+        Matrix m = new Matrix();
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_ROTATE_90:
+                m.postRotate(90);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_180:
+                m.postRotate(180);
+                break;
+            case ExifInterface.ORIENTATION_ROTATE_270:
+                m.postRotate(270);
+                break;
+            case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+                m.postScale(-1, 1);
+                break;
+            case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+                m.postScale(1, -1);
+                break;
+            case ExifInterface.ORIENTATION_TRANSPOSE:
+                m.postRotate(90);
+                m.postScale(-1, 1);
+                break;
+            case ExifInterface.ORIENTATION_TRANSVERSE:
+                m.postRotate(270);
+                m.postScale(-1, 1);
+                break;
+            default:
+                return src;
+        }
+        try {
+            Bitmap out = Bitmap.createBitmap(src, 0, 0, src.getWidth(), src.getHeight(), m, true);
+            if (out != null && out != src) {
+                try {
+                    src.recycle();
+                } catch (Throwable ignore) {
+                    // 无所谓
+                }
+                return out;
+            }
+        } catch (Throwable t) {
+            AppLog.w(TAG, "EXIF 摆正失败: " + t);
+        }
+        return src;
+    }
+
+    private static void closeQuietly(InputStream is) {
+        if (is == null) {
+            return;
+        }
+        try {
+            is.close();
+        } catch (Throwable ignore) {
+            // 关流失败无影响
+        }
     }
 
     // ============================================================
@@ -1042,13 +1401,24 @@ public class CameraOcrActivity extends AppCompatActivity {
         tvMeta.setText("等待第一帧…");
         bottom.addView(tvMeta);
 
-        // ---------- 底部：按钮行 ----------
+        // ---------- 底部：按钮行（两行）----------
+        // 五个按钮挤一行，每个只剩 1/5 宽度，中文两个字都点不准，
+        // 所以拆成 3 + 2 两行。
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         rowLp.topMargin = dp(10);
         bottom.addView(row, rowLp);
+
+        Button btnGallery = pill("相册", 0xFFFFFFFF, 0x33FFFFFF);
+        btnGallery.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickFromGallery();
+            }
+        });
+        row.addView(btnGallery, weightLp());
 
         Button btnCopy = pill("复制", 0xFFFFFFFF, 0x33FFFFFF);
         btnCopy.setOnClickListener(new View.OnClickListener() {
@@ -1068,12 +1438,28 @@ public class CameraOcrActivity extends AppCompatActivity {
                 if (paused) {
                     setStatus("已暂停识别（画面仍在预览）", false);
                 } else {
+                    // 「继续」同时承担「解除相册结果固定」：清掉固定标记，
+                    // 让下一帧实时结果能重新刷到界面上。
+                    if (galleryPinned) {
+                        galleryPinned = false;
+                        shownText = "";
+                        pendingText = "";
+                        pendingHits = 0;
+                        renderResult();
+                    }
                     setStatus("识别中…", false);
                     scheduleShot();
                 }
             }
         });
         row.addView(btnPause, weightLp());
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams row2Lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        row2Lp.topMargin = dp(6);
+        bottom.addView(row2, row2Lp);
 
         btnTorch = pill("手电筒", 0xFFFFFFFF, 0x33FFFFFF);
         btnTorch.setOnClickListener(new View.OnClickListener() {
@@ -1084,7 +1470,7 @@ public class CameraOcrActivity extends AppCompatActivity {
                 refreshRepeatingPreview();
             }
         });
-        row.addView(btnTorch, weightLp());
+        row2.addView(btnTorch, weightLp());
 
         btnRate = pill("节奏·" + INTERVAL_LABELS[intervalIndex], 0xFFFFFFFF, 0x33FFFFFF);
         btnRate.setOnClickListener(new View.OnClickListener() {
@@ -1096,7 +1482,7 @@ public class CameraOcrActivity extends AppCompatActivity {
                         + "（间隔 " + INTERVALS[intervalIndex] + " ms）", false);
             }
         });
-        row.addView(btnRate, weightLp());
+        row2.addView(btnRate, weightLp());
 
         FrameLayout.LayoutParams bottomLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
