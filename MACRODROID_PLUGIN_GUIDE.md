@@ -1053,7 +1053,7 @@ Tasker 的变量协议只认 String / String[] / ArrayList&lt;String&gt;，
 | **无障碍截图能力** | `CAPABILITY_CAN_TAKE_SCREENSHOT` + `takeScreenshot()`，同为 API 30 |
 | **无障碍服务隐私** | 不声明 `accessibilityEventTypes`，`onAccessibilityEvent` 空实现 |
 | **摄像头实时识别** | 独立页 `CameraOcrActivity`（Camera2，不引 CameraX）；结果只保留数字，不进插件链路 |
-| **相册识别** | 同一页内「相册」按钮走 `ACTION_OPEN_DOCUMENT`（SAF，**不需要读相册权限**）；`inSampleSize` ≤1920 + EXIF 转正；识别后钉住界面并暂停实时 |
+| **相册识别** | 同一页内「相册」按钮走 `ACTION_OPEN_DOCUMENT`（SAF，**不需要读相册权限**）；按「宽度 ≤2400 + 总像素 ≤1200 万」采样（不按最长边，长截图否则会被压窄）、超 1400 高自动分块识别（重叠 160、按行中心去重、y 加回全局）；识别后**显示原图并给含数字的行描绿框**（可双指放大 / 拖动 / 双击 1x↔2.5x）；识别后钉住界面并暂停实时 |
 
 ---
 

@@ -8,9 +8,11 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
@@ -32,7 +34,10 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Size;
 import android.util.TypedValue;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -57,7 +62,9 @@ import com.google.gson.JsonParser;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -122,6 +129,18 @@ import java.util.regex.Pattern;
  *     不摆正识别率会明显下降；
  *   · 识别完把界面「钉住」（{@link #galleryPinned}）并暂停实时，
  *     否则下一帧摄像头画面会立刻盖掉刚看清的结果；点「继续」恢复。
+ *
+ * ════════════════════════════════════════════════════════════════
+ * 七、相册模式为什么要「显示图片 + 画框」
+ * ════════════════════════════════════════════════════════════════
+ * 取件码场景的输入常常是一张很长的清单截图（几十上百行，每行一串
+ * 四位数字）。只把数字抽出来摆成一列，人根本对不上号 —— 究竟框的是
+ * 哪一行、有没有漏、有没有把「货架号」当成了取件码，光看数字看不出来。
+ * 所以相册模式做两件事：
+ *   · 原图直接显示在页面上（居中缩放，上方给返回栏、下方让开结果面板）；
+ *   · 用 type=2 识别拿到每行包围盒，只给「这一行里确实有数字」的行描框。
+ * 图与框由同一个 {@link GalleryOverlay} 画：一次算准 scale 与偏移，
+ * 图在哪框就在哪，不会出现两层各自缩放导致的错位。
  */
 public class CameraOcrActivity extends AppCompatActivity {
 
@@ -134,12 +153,35 @@ public class CameraOcrActivity extends AppCompatActivity {
     private static final int REQ_PICK_IMAGE = 9102;
 
     /**
-     * 相册图解码后的最长边上限。
+     * 相册图解码后的像素总量上限（约 48MB ARGB_8888）。
      *
-     * 比摄像头那 720 宽得多：相册图是静态的、只识别一次，没有「每秒重算」
-     * 的压力，放大一点对小字（比如小票底部的一行条码数字）更有利。
+     * 【为什么不用「最长边」限制】取件码清单是一张又宽又长的截图，按最长边
+     * 等比缩放会把宽度一起压下去 —— 一张 1080×8000 的图缩到最长边 2560，
+     * 宽度只剩 345 像素，一行四位数字连笔画都挤没了，识别率断崖下跌。
+     * 所以改成：**宽度**不超 {@link #MAX_GALLERY_WIDTH}、**总像素**不超本值，
+     * 两者都不必牺牲宽度。高度超了由分块识别解决（见 {@link #CHUNK_H}）。
      */
-    private static final int MAX_GALLERY_SIDE = 1920;
+    private static final int MAX_GALLERY_PIXELS = 12_000_000;
+
+    /** 解码后宽度上限。超过就降采样，太宽的图对识别没好处，只烧内存。 */
+    private static final int MAX_GALLERY_WIDTH = 2400;
+
+    /**
+     * 分块识别：每块的高度（像素）。
+     *
+     * ML Kit 拿到一张 8000 像素高的图会自己缩到很小的尺寸再识别，小字直接
+     * 消失；切成 1400 高的块逐块送进去，每块的字高才是「原始字高」，
+     * 这是长截图能认出字的前提。
+     */
+    private static final int CHUNK_H = 1400;
+
+    /**
+     * 相邻块的重叠高度。
+     *
+     * 不重叠的话，正好压在切缝上的那一行会被切成两半，两边都认不出；
+     * 重叠 160 像素（约两行）让每行至少在某一整块里完整出现。
+     */
+    private static final int CHUNK_OVERLAP = 160;
 
     /** 连续命中多少次才认为结果稳定。 */
     private static final int HITS_TO_SETTLE = 2;
@@ -162,6 +204,11 @@ public class CameraOcrActivity extends AppCompatActivity {
     private Button btnPause;
     private Button btnTorch;
     private Button btnRate;
+
+    /** 相册图片 + 识别框的显示层（实时模式下 GONE）。 */
+    private GalleryOverlay overlay;
+    /** 底部结果面板的实测高度，用来给图片让出显示空间。 */
+    private int panelHeight = 0;
 
     // ============================================================
     //  Camera2
@@ -245,6 +292,12 @@ public class CameraOcrActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         stopping = false;
+        // 上次是「识别中被切走」离开的：图还留在 overlay 上没回收。回到页面时
+        // 相册模式已经解除（onPause 清了 galleryPinned），该把图撤掉给实时预览让路。
+        if (!galleryPinned && !galleryBusy && overlay != null
+                && overlay.getVisibility() == View.VISIBLE) {
+            hideGalleryImage();
+        }
         // 相册结果被钉住、或相册图正在识别时不要解除暂停：
         // 从文件选择器返回的顺序是 onActivityResult → onResume，
         // 若这里无条件 paused=false，会把相册模式刚设的暂停顶掉。
@@ -267,7 +320,13 @@ public class CameraOcrActivity extends AppCompatActivity {
         // 离开这一页就解除「相册结果钉住」：下次进来应该是个干净的实时页，
         // 而不是还钉着上次那张相册图、还停着识别。
         galleryPinned = false;
-        galleryBusy = false;
+        // 正在识别时不要抢走 overlay 里的位图：识别线程还在用它（切块、送
+        // ML Kit），回收掉会让识别抛「recycled bitmap」。此时连 galleryBusy
+        // 也保持 true，等识别自己回来收尾（它会在 stopping 时负责回收）。
+        if (!galleryBusy) {
+            hideGalleryImage();
+            galleryBusy = false;
+        }
         closeCamera();
     }
 
@@ -276,6 +335,12 @@ public class CameraOcrActivity extends AppCompatActivity {
         super.onDestroy();
         stopping = true;
         closeCamera();
+        // 走 destroy 时 overlay 还没回收的位图必须在这里收掉：onPause 可能因为
+        // 「识别还在跑」而跳过回收，之后识别回来发现 stopping 会自己收；
+        // 但如果页面是直接被销毁、识别线程随后退出，就只能靠这一句兜底。
+        if (!galleryBusy) {
+            hideGalleryImage();
+        }
         final MlKitEngine e = engine;
         engine = null;
         if (e != null) {
@@ -518,6 +583,12 @@ public class CameraOcrActivity extends AppCompatActivity {
                         @Override
                         public void onConfigured(@NonNull CameraCaptureSession s) {
                             session = s;
+                            // 相册图正盖在预览之上（不透明），此时再推帧只是白烧电：
+                            // 画面谁也看不见，识别也已经暂停。
+                            if (galleryPinned || galleryBusy
+                                    || (overlay != null && overlay.getVisibility() == View.VISIBLE)) {
+                                return;
+                            }
                             startRepeatingPreview();
                             setStatus("识别中…", false);
                             scheduleShot();
@@ -842,6 +913,17 @@ public class CameraOcrActivity extends AppCompatActivity {
             return;
         }
 
+        // 先出图、后出框：相册图看一眼就知道选没选对，没必要让人盯着
+        // 「识别中…」干等一两秒。框等识别完再补上去。
+        final Bitmap shown = bmp;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showGalleryImage(shown, null);
+                setStatus("相册图片识别中…", false);
+            }
+        });
+
         MlKitEngine eng = engine;
         if (eng == null) {
             eng = new MlKitEngine();
@@ -849,41 +931,66 @@ public class CameraOcrActivity extends AppCompatActivity {
             engine = eng;
         }
 
-        String parsed = null;
+        List<TextLine> lines = null;
         String err = null;
+        int chunks = 0;
         try {
-            String json = eng.recognize(bmp, 1);
-            lastError = null;
-            parsed = parseTexts(json);
+            // chunkCount[0] 出参：实际切了几块（1 = 整张一次认出），只用于展示
+            int[] chunkCount = new int[1];
+            lines = recognizeInChunks(eng, bmp, chunkCount);
             err = lastError;
             lastError = null;
+            chunks = chunkCount[0];
         } catch (Throwable t) {
             err = t.toString();
-        } finally {
-            try {
-                bmp.recycle();
-            } catch (Throwable ignore) {
-                // 已回收
-            }
         }
+        // 注意：这里**不**回收 bmp。它已经交给 overlay 显示在屏幕上了，
+        // 回收掉再画就会崩（Canvas: trying to use a recycled bitmap）。
+        // 失败时由 hideGalleryImage() 统一回收。
 
+        final List<TextLine> resultLines = lines;
         final long cost = System.currentTimeMillis() - t0;
-        final String text = parsed == null ? "" : parsed;
         final String error = err;
-        final String numbers = extractNumbers(text);
-        final int rawLines = text.isEmpty() ? 0 : text.split("\n").length;
+        final int chunkUsed = chunks;
 
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 galleryBusy = false;
-                if (error != null) {
+                if (stopping) {
+                    // 识别期间用户离开了页面：别再往已经不可见的界面上写状态，
+                    // 直接把图收掉，回到页面时是干净的实时页。
+                    hideGalleryImage();
+                    return;
+                }
+                if (error != null || resultLines == null) {
+                    hideGalleryImage();
+                    startRepeatingPreview();
                     setStatus("相册识别失败：" + error, true);
                     paused = false;
                     updatePauseButton();
                     scheduleShot();
                     return;
                 }
+
+                // 拆成「全文」与「数字行框」两部分：
+                //   · 全文跑既有的 extractNumbers，口径与实时识别完全一致；
+                //   · 框只留在有数字的行上 —— 整张图每行都描框会糊成一片，
+                //     反而看不出哪行是取件码。
+                StringBuilder sb = new StringBuilder();
+                List<RectF> boxes = new ArrayList<>();
+                for (TextLine ln : resultLines) {
+                    if (ln.text != null) {
+                        sb.append(ln.text).append('\n');
+                    }
+                    if (ln.box != null && !extractNumbers(ln.text).isEmpty()) {
+                        boxes.add(ln.box);
+                    }
+                }
+                final String text = sb.toString();
+                final int rawLines = resultLines.size();
+                final String numbers = extractNumbers(text);
+
                 // 钉住界面：实时帧不再覆盖这次结果
                 galleryPinned = true;
                 paused = true;
@@ -907,21 +1014,129 @@ public class CameraOcrActivity extends AppCompatActivity {
                 if (rawLines > 0) {
                     meta.append(" · 识别到 ").append(rawLines).append(" 行");
                 }
+                if (!boxes.isEmpty()) {
+                    meta.append(" · 框出 ").append(boxes.size()).append(" 行");
+                }
+                if (chunkUsed > 1) {
+                    meta.append(" · 分 ").append(chunkUsed).append(" 块识别");
+                }
                 if (tvMeta != null) {
                     tvMeta.setText(meta.toString());
                 }
-                setStatus("相册识别完成（实时已暂停，点「继续」恢复）", false);
-                AppLog.i(TAG, "相册识别完成：" + countNumbers(numbers) + " 个数字，耗时 " + cost + "ms");
+                // 补框：同一张位图，overlay 内部判断到是同一个对象就不会回收
+                showGalleryImage(shown, boxes);
+                setStatus("相册识别完成（绿框=识别到的数字，点「继续」恢复实时）", false);
+                AppLog.i(TAG, "相册识别完成：行 " + rawLines + "，数字 "
+                        + countNumbers(numbers) + "，框 " + boxes.size()
+                        + "，耗时 " + cost + "ms");
             }
         });
+    }
+
+    /**
+     * 分块识别一张（可能很长的）相册图。
+     *
+     * 【为什么要分块】ML Kit 内部会把超大图缩到很小的尺寸再识别，一张
+     * 8000 像素高的取件码截图整体送进去，每行四位数字会被缩成两三个像素，
+     * 认出来一堆乱码。切块之后每块的字高保持原样，识别率才有保证。
+     *
+     * 【为什么不重不漏】相邻块重叠 {@link #CHUNK_OVERLAP} 像素，但每块
+     * 只采纳「行中心落在本块专属区」的行 —— 重叠区交给先出现的那一块，
+     * 后一块在重叠区里只补前一块没覆盖到的部分。判定用行中心而不是
+     * 整框包含，是因为压在切缝上的行框必然跨块，用「框完全在内」会两边都不收。
+     *
+     * @param chunkCount 出参：实际切了几块（1 表示没切）
+     * @return 全部行（坐标已加回整图 y），失败返回 null 且 lastError 有值
+     */
+    private List<TextLine> recognizeInChunks(MlKitEngine eng, Bitmap bmp, int[] chunkCount) {
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        List<TextLine> all = new ArrayList<>();
+
+        // 不太长就直接整张识别，省掉切块开销
+        if (h <= CHUNK_H * 3 / 2) {
+            chunkCount[0] = 1;
+            lastError = null;
+            String json = eng.recognize(bmp, 2);
+            List<TextLine> once = parseLines(json);
+            if (lastError != null) {
+                return null;
+            }
+            return once == null ? all : once;
+        }
+
+        int step = CHUNK_H - CHUNK_OVERLAP;
+        // 先算出总块数，纯粹为了给用户显示进度：长图要切七八块、每块一次
+        // ML Kit 调用，不给进度的话这几秒界面一动不动，很像卡死。
+        int total = (h + step - 1) / step;
+        int idx = 0;
+        for (int y0 = 0; y0 < h; y0 += step) {
+            int y1 = Math.min(h, y0 + CHUNK_H);
+            // 本块「独占」的纵向范围：首块从头开始，末块到图底结束，
+            // 中间块各让掉半个重叠区给邻居。
+            int ownTop = (y0 == 0) ? 0 : y0 + CHUNK_OVERLAP / 2;
+            int ownBottom = (y1 >= h) ? h : y1 - CHUNK_OVERLAP / 2;
+
+            Bitmap sub = null;
+            try {
+                sub = Bitmap.createBitmap(bmp, 0, y0, w, y1 - y0);
+            } catch (Throwable t) {
+                AppLog.w(TAG, "切块失败 y0=" + y0 + ": " + t);
+                lastError = "切块失败: " + t;
+                return null;
+            }
+            try {
+                lastError = null;
+                String json = eng.recognize(sub, 2);
+                List<TextLine> part = parseLines(json);
+                if (lastError != null) {
+                    return null;
+                }
+                if (part != null) {
+                    for (TextLine ln : part) {
+                        if (ln.box == null) {
+                            continue;
+                        }
+                        // 行中心换回整图坐标，再决定这一行归谁
+                        float centerY = y0 + (ln.box.top + ln.box.bottom) / 2f;
+                        if (centerY < ownTop || centerY >= ownBottom) {
+                            continue;
+                        }
+                        RectF lifted = new RectF(ln.box.left, ln.box.top + y0,
+                                ln.box.right, ln.box.bottom + y0);
+                        all.add(new TextLine(ln.text, lifted));
+                    }
+                }
+            } finally {
+                if (sub != null && !sub.isRecycled()) {
+                    try {
+                        sub.recycle();
+                    } catch (Throwable ignore) {
+                        // 已回收
+                    }
+                }
+            }
+            idx++;
+            if (total > 2) {
+                setStatus("长图分块识别中… " + idx + "/" + total, false);
+            }
+            if (y1 >= h) {
+                break;
+            }
+        }
+        chunkCount[0] = idx;
+        AppLog.i(TAG, "长图分块识别: " + w + "x" + h + " → " + idx + " 块，共 "
+                + all.size() + " 行");
+        return all;
     }
 
     /**
      * 解码相册图：先读尺寸算采样率，再真正解码，最后按 EXIF 摆正。
      *
      * 相册图动辄 4000×3000，直接 ARGB_8888 解码要 48MB，低端机上
-     * 有大概率 OOM；inSampleSize 是 2 的幂，缩到最长边 ≤ MAX_GALLERY_SIDE
-     * 就够识别了。
+     * 有大概率 OOM；inSampleSize 是 2 的幂，按「宽度 ≤ MAX_GALLERY_WIDTH
+     * 且总像素 ≤ MAX_GALLERY_PIXELS」降采样就够识别了（不按最长边 ——
+     * 长截图等比缩会把宽度压没，见 MAX_GALLERY_PIXELS 的注释）。
      */
     private Bitmap decodeGalleryBitmap(Uri uri) {
         try {
@@ -940,9 +1155,12 @@ public class CameraOcrActivity extends AppCompatActivity {
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
                 return null;
             }
-            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            // 采样率按「宽度上限 + 总像素上限」算，不按最长边 ——
+            // 见 MAX_GALLERY_PIXELS 的注释：长截图等比缩会把字压没。
             int sample = 1;
-            while (longest / sample > MAX_GALLERY_SIDE) {
+            while ((bounds.outWidth / sample) > MAX_GALLERY_WIDTH
+                    || ((long) (bounds.outWidth / sample) * (bounds.outHeight / sample))
+                    > MAX_GALLERY_PIXELS) {
                 sample *= 2;
             }
 
@@ -1191,6 +1409,427 @@ public class CameraOcrActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 显示相册图（并把数字行框上去）。
+     *
+     * 调用两次：解码后先传 boxes=null 出图，识别完再带上框补画一次。
+     * 同一个 Bitmap 传两次是安全的 —— {@link GalleryOverlay#setImage}
+     * 只在「新旧不是同一个对象」时才回收旧的。
+     */
+    private void showGalleryImage(Bitmap bmp, List<RectF> boxes) {
+        if (overlay == null || bmp == null) {
+            return;
+        }
+        if (stopping) {
+            // 页面已经离开（比如识别过程中按了返回），别再往界面上挂图。
+            // 但如果 overlay 此刻正持有这张图（第二次带框调用），就不能回收 ——
+            // 回收了 overlay 再画就会崩，交给 hideGalleryImage/clear 处理。
+            if (overlay.getImage() != bmp) {
+                try {
+                    bmp.recycle();
+                } catch (Throwable ignore) {
+                    // 已回收
+                }
+            }
+            return;
+        }
+        overlay.setImage(bmp, boxes);
+        overlay.setVisibility(View.VISIBLE);
+        // 图片已经整屏盖住预览了，没必要继续往 Surface 上推帧 —— 停掉省电。
+        try {
+            if (session != null) {
+                session.stopRepeating();
+            }
+        } catch (Throwable ignore) {
+            // 会话可能已被关闭
+        }
+    }
+
+    /** 撤掉相册图（顺带回收位图），回到实时预览。 */
+    private void hideGalleryImage() {
+        if (overlay == null) {
+            return;
+        }
+        overlay.clear();
+        overlay.setVisibility(View.GONE);
+    }
+
+    /**
+     * 解析 recognize(type=2) 的结果：每行取 text 与包围盒。
+     *
+     * 与 {@link #parseTexts} 的唯一区别是保留坐标（要画框）。
+     * 出错时同样返回 null 并置 {@link #lastError}。
+     */
+    private List<TextLine> parseLines(String json) {
+        if (json == null) {
+            lastError = "识别返回为空";
+            return null;
+        }
+        try {
+            JsonObject o = JsonParser.parseString(json).getAsJsonObject();
+            int status = o.has("status") ? o.get("status").getAsInt() : 0;
+            if (status != 200) {
+                String msg = "status=" + status;
+                if (o.has("data") && o.get("data").isJsonPrimitive()) {
+                    msg = o.get("data").getAsString();
+                }
+                lastError = msg;
+                return null;
+            }
+            JsonArray arr = o.getAsJsonArray("data");
+            List<TextLine> out = new ArrayList<>();
+            if (arr == null) {
+                return out;
+            }
+            for (JsonElement el : arr) {
+                if (el == null || !el.isJsonObject()) {
+                    continue;
+                }
+                JsonObject item = el.getAsJsonObject();
+                if (!item.has("text")) {
+                    continue;
+                }
+                String text = item.get("text").getAsString();
+                RectF box = null;
+                if (item.has("x") && item.has("y") && item.has("w") && item.has("h")) {
+                    int x = item.get("x").getAsInt();
+                    int y = item.get("y").getAsInt();
+                    int w = item.get("w").getAsInt();
+                    int h = item.get("h").getAsInt();
+                    // 坐标 <0 表示这一行没给包围盒，别画到左上角去
+                    if (x >= 0 && y >= 0 && w > 0 && h > 0) {
+                        box = new RectF(x, y, x + w, y + h);
+                    }
+                }
+                out.add(new TextLine(text, box));
+            }
+            return out;
+        } catch (Throwable t) {
+            lastError = t.toString();
+            return null;
+        }
+    }
+
+    /** 一行识别结果：文本 + 图片像素坐标（没有包围盒时 box 为 null）。 */
+    private static final class TextLine {
+        final String text;
+        final RectF box;
+
+        TextLine(String text, RectF box) {
+            this.text = text;
+            this.box = box;
+        }
+    }
+
+    /**
+     * 相册图片 + 识别框的显示层。
+     *
+     * 为什么不拆成「ImageView 显示图」+「另一个 View 画框」两层：两层各自
+     * 算一次「图在哪、缩放多少」，稍有偏差框就和文字错位；而且两层要跟着
+     * 尺寸变化同步，多一份状态就多一个 bug 来源。这里一次算准，
+     * 先画图、再用同一套坐标画框。
+     *
+     * 绘制区域由 padding 决定：上边给顶部返回栏让位、下边给结果面板让位，
+     * 两者之间的可用区里把图按 CENTER_INSIDE 居中。
+     *
+     * 【为什么要能缩放】取件码清单是张很长的截图，整张塞进手机屏幕后
+     * 单行只剩三五个像素高，框叠在一起、数字根本看不清 —— 那这个「框」
+     * 就等于没做。所以支持双指放大、单指拖动、双击在 1x/2.5x 之间切换，
+     * 放大后框线宽保持不变（按屏幕坐标画，不随图放大变粗）。
+     */
+    private class GalleryOverlay extends View
+            implements GestureDetector.OnGestureListener,
+            GestureDetector.OnDoubleTapListener {
+
+        private Bitmap image;
+        private final List<RectF> boxes = new ArrayList<>();
+        private final Paint imgPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+        private final Paint boxFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint boxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        /** 未缩放时图片所占的屏幕矩形（每次 onDraw 重算）。 */
+        private final RectF baseRect = new RectF();
+        private final RectF oneBox = new RectF();
+        private final float roundPx;
+        private final float minBoxH;
+        private final float baseStroke;
+
+        private final GestureDetector gestures;
+        private final ScaleGestureDetector scaler;
+
+        /** 用户额外放大的倍数（1 = 整图适配屏幕）。 */
+        private float userScale = 1f;
+        /** 相对「居中位置」的平移。 */
+        private float panX = 0f;
+        private float panY = 0f;
+        /** 放大上限：再大也看不出更多东西，只会糊。 */
+        private static final float MAX_SCALE = 8f;
+
+        GalleryOverlay(Context context) {
+            super(context);
+            setBackgroundColor(0xFF000000);
+            setClickable(true);   // 吃掉点击，别穿到下面的预览层去
+            roundPx = dp(3);
+            minBoxH = dp(10);
+            baseStroke = dp(1.8f);
+            boxPaint.setStyle(Paint.Style.STROKE);
+            boxPaint.setStrokeWidth(baseStroke);
+            // 亮绿：取件码截图多是黑底白字，绿框在两种底色上都够跳
+            boxPaint.setColor(0xFF3DDC97);
+            // 框内极淡的一层绿，让「这一行被选中」在缩得很小的长图上也能一眼看到
+            boxFill.setStyle(Paint.Style.FILL);
+            boxFill.setColor(0x223DDC97);
+
+            gestures = new GestureDetector(context, this);
+            gestures.setOnDoubleTapListener(this);
+            scaler = new ScaleGestureDetector(context,
+                    new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                        @Override
+                        public boolean onScale(ScaleGestureDetector d) {
+                            setUserScale(userScale * d.getScaleFactor());
+                            return true;
+                        }
+                    });
+        }
+
+        /** 当前持有的位图（供外部判断「这张图是不是已经在显示」，避免误回收）。 */
+        Bitmap getImage() {
+            return image;
+        }
+
+        void setImage(Bitmap bmp, List<RectF> newBoxes) {
+            Bitmap old = image;
+            boolean sameImage = (old == bmp);
+            image = bmp;
+            boxes.clear();
+            if (newBoxes != null) {
+                boxes.addAll(newBoxes);
+            }
+            if (!sameImage) {
+                // 换了一张图才复位缩放；同一张图补框时保持用户当前的放大位置，
+                // 否则刚放大找到某一行，框一补上来画面就跳回全景，白找了。
+                resetView();
+            }
+            if (old != null && old != bmp && !old.isRecycled()) {
+                try {
+                    old.recycle();
+                } catch (Throwable ignore) {
+                    // 正在绘制时回收会抛，忽略即可
+                }
+            }
+            invalidate();
+        }
+
+        void clear() {
+            Bitmap old = image;
+            image = null;
+            boxes.clear();
+            resetView();
+            if (old != null && !old.isRecycled()) {
+                try {
+                    old.recycle();
+                } catch (Throwable ignore) {
+                    // 同上
+                }
+            }
+            invalidate();
+        }
+
+        private void resetView() {
+            userScale = 1f;
+            panX = 0f;
+            panY = 0f;
+        }
+
+        private void setUserScale(float target) {
+            float s = target;
+            if (s < 1f) {
+                s = 1f;
+            }
+            if (s > MAX_SCALE) {
+                s = MAX_SCALE;
+            }
+            userScale = s;
+            clampPan();
+            invalidate();
+        }
+
+        /**
+         * 限制平移范围：图比可用区大时最多拖到边缘，比可用区小时不许拖
+         * （否则能把图拖出屏幕外，剩一片黑，看着像崩了）。
+         */
+        private void clampPan() {
+            float availW = getWidth() - getPaddingLeft() - getPaddingRight();
+            float availH = getHeight() - getPaddingTop() - getPaddingBottom();
+            if (availW <= 0 || availH <= 0 || baseRect.width() <= 0) {
+                panX = 0f;
+                panY = 0f;
+                return;
+            }
+            float maxX = Math.max(0f, (baseRect.width() * userScale - availW) / 2f);
+            float maxY = Math.max(0f, (baseRect.height() * userScale - availH) / 2f);
+            if (panX > maxX) {
+                panX = maxX;
+            } else if (panX < -maxX) {
+                panX = -maxX;
+            }
+            if (panY > maxY) {
+                panY = maxY;
+            } else if (panY < -maxY) {
+                panY = -maxY;
+            }
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int ow, int oh) {
+            super.onSizeChanged(w, h, ow, oh);
+            clampPan();
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent e) {
+            if (image == null) {
+                return super.onTouchEvent(e);
+            }
+            scaler.onTouchEvent(e);
+            if (!scaler.isInProgress()) {
+                gestures.onTouchEvent(e);
+            }
+            int action = e.getActionMasked();
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                // 缩回接近 1 倍就吸附回正中，避免留一点点偏移看着别扭
+                if (userScale < 1.02f) {
+                    resetView();
+                    invalidate();
+                }
+            }
+            return true;
+        }
+
+        // ---------- 单指拖动 ----------
+        @Override
+        public boolean onDown(MotionEvent e) {
+            return true;
+        }
+
+        @Override
+        public void onShowPress(MotionEvent e) {
+            // 不需要
+        }
+
+        @Override
+        public boolean onSingleTapUp(MotionEvent e) {
+            return false;
+        }
+
+        @Override
+        public boolean onScroll(MotionEvent e1, MotionEvent e2, float dx, float dy) {
+            if (userScale <= 1.001f) {
+                return false;   // 没放大时拖动没意义
+            }
+            panX -= dx;
+            panY -= dy;
+            clampPan();
+            invalidate();
+            return true;
+        }
+
+        @Override
+        public void onLongPress(MotionEvent e) {
+            // 不需要
+        }
+
+        @Override
+        public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
+            return false;   // 长图浏览靠拖，不做惯性，免得甩丢位置
+        }
+
+        // ---------- 双击 ----------
+        @Override
+        public boolean onDoubleTap(MotionEvent e) {
+            if (userScale > 1.5f) {
+                resetView();
+            } else {
+                setUserScale(2.5f);
+            }
+            invalidate();
+            return true;
+        }
+
+        @Override
+        public boolean onDoubleTapEvent(MotionEvent e) {
+            return false;
+        }
+
+        @Override
+        public boolean onSingleTapConfirmed(MotionEvent e) {
+            return false;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            Bitmap bmp = image;
+            if (bmp == null || bmp.isRecycled()) {
+                return;
+            }
+            float availW = getWidth() - getPaddingLeft() - getPaddingRight();
+            float availH = getHeight() - getPaddingTop() - getPaddingBottom();
+            if (availW <= 0 || availH <= 0) {
+                return;
+            }
+            // CENTER_INSIDE：整张图完整可见，且不变形
+            float scale = Math.min(availW / bmp.getWidth(), availH / bmp.getHeight());
+            float drawW = bmp.getWidth() * scale;
+            float drawH = bmp.getHeight() * scale;
+            float left = getPaddingLeft() + (availW - drawW) / 2f;
+            float top = getPaddingTop() + (availH - drawH) / 2f;
+            baseRect.set(left, top, left + drawW, top + drawH);
+
+            float cx = baseRect.centerX();
+            float cy = baseRect.centerY();
+            float tx = cx + panX;
+            float ty = cy + panY;
+
+            // 图片：直接交给 canvas 变换，缩放由 GPU 采样，最省事也最快
+            canvas.save();
+            canvas.translate(tx, ty);
+            canvas.scale(userScale, userScale);
+            canvas.translate(-cx, -cy);
+            canvas.drawBitmap(bmp, null, baseRect, imgPaint);
+            canvas.restore();
+
+            // 框：按「屏幕坐标」自己算，不放在上面那个变换里 ——
+            // 否则放大 8 倍时线宽也跟着粗 8 倍，糊成一片。
+            float stroke = baseStroke / (float) Math.sqrt(userScale);
+            boxPaint.setStrokeWidth(stroke);
+            for (RectF box : boxes) {
+                if (box == null) {
+                    continue;
+                }
+                // ① 先映射到「未缩放时的屏幕坐标」
+                float l = baseRect.left + box.left * scale;
+                float t = baseRect.top + box.top * scale;
+                float r = baseRect.left + box.right * scale;
+                float b = baseRect.top + box.bottom * scale;
+                // ② 再套上与图片相同的缩放与平移
+                l = tx + (l - cx) * userScale;
+                r = tx + (r - cx) * userScale;
+                t = ty + (t - cy) * userScale;
+                b = ty + (b - cy) * userScale;
+                // 整张长图缩下来后单行可能只有两三个像素高，框会糊成一条线；
+                // 撑到最小高度，至少能看清「这一行被选中了」。
+                if (b - t < minBoxH) {
+                    float mid = (t + b) / 2f;
+                    t = mid - minBoxH / 2f;
+                    b = mid + minBoxH / 2f;
+                }
+                oneBox.set(l, t, r, b);
+                canvas.drawRoundRect(oneBox, roundPx, roundPx, boxFill);
+                canvas.drawRoundRect(oneBox, roundPx, roundPx, boxPaint);
+            }
+        }
+    }
+
     /** 数字串：整数或带小数。 */
     private static final Pattern NUM = Pattern.compile("\\d+(?:\\.\\d+)?");
     /** 三位一组的千分位（前面有数字、后面正好三位且不再是数字）。 */
@@ -1335,6 +1974,14 @@ public class CameraOcrActivity extends AppCompatActivity {
         rootLayout.addView(textureView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // 相册图 + 识别框这一层盖在预览之上。z 序由 addView 先后决定：
+        // 它在 top / bottom 之前加，所以返回栏和结果面板仍然压在它上面、
+        // 按钮不会被图片挡住。
+        overlay = new GalleryOverlay(this);
+        overlay.setVisibility(View.GONE);
+        rootLayout.addView(overlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         // ---------- 顶部：返回 + 状态 ----------
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
@@ -1447,6 +2094,9 @@ public class CameraOcrActivity extends AppCompatActivity {
                         pendingHits = 0;
                         renderResult();
                     }
+                    // 撤掉相册图、把预览重新推起来（显示图片时停过 repeating）
+                    hideGalleryImage();
+                    startRepeatingPreview();
                     setStatus("识别中…", false);
                     scheduleShot();
                 }
@@ -1489,6 +2139,23 @@ public class CameraOcrActivity extends AppCompatActivity {
         bottomLp.gravity = Gravity.BOTTOM;
         bottomLp.setMargins(dp(12), 0, dp(12), dp(18));
         rootLayout.addView(bottom, bottomLp);
+
+        // 结果面板是 wrap_content（数字多时会长高），so 用实测高度给图片留地，
+        // 否则长清单被面板遮掉下面一截，用户以为没识别全。
+        bottom.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int l, int t, int r, int b,
+                                       int ol, int ot, int or, int ob) {
+                int h = b - t;
+                if (h > 0 && h != panelHeight) {
+                    panelHeight = h;
+                    if (overlay != null) {
+                        overlay.setPadding(0, dp(60), 0, h + dp(10));
+                        overlay.invalidate();
+                    }
+                }
+            }
+        });
     }
 
     private void updatePauseButton() {
