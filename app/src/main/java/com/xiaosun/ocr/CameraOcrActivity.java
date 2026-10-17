@@ -138,7 +138,13 @@ import java.util.regex.Pattern;
  * 哪一行、有没有漏、有没有把「货架号」当成了取件码，光看数字看不出来。
  * 所以相册模式做两件事：
  *   · 原图直接显示在页面上（居中缩放，上方给返回栏、下方让开结果面板）；
- *   · 用 type=2 识别拿到每行包围盒，只给「这一行里确实有数字」的行描框。
+ *   · 用 type=2 识别拿到每行包围盒，只给「这一行里确实有数字」的行描框，
+ *     并把这一行抽出来的数字**写在框里** —— 清单截图上的字又小又挤，
+ *     人眼要确认「这个框取的是 8512 还是 8415」，只能靠框里那串数字，
+ *     光有框看不出来。
+ *   · 框里的数字有下限：整张长图缩到手机上时单行可能只有 6 个屏幕像素，
+ *     这种密度下写字只剩一层白噪点，所以行高不到约 11px 就不画 ——
+ *     双指放大到能读了它自己出现，不需要额外开关。
  * 图与框由同一个 {@link GalleryOverlay} 画：一次算准 scale 与偏移，
  * 图在哪框就在哪，不会出现两层各自缩放导致的错位。
  */
@@ -977,15 +983,22 @@ public class CameraOcrActivity extends AppCompatActivity {
                 //   · 全文跑既有的 extractNumbers，口径与实时识别完全一致；
                 //   · 框只留在有数字的行上 —— 整张图每行都描框会糊成一片，
                 //     反而看不出哪行是取件码。
+                // 框上带 label：就是这一行抽出来的数字（与下方列表同一套口径），
+                // 这样「框住的那行」与「列表里的那串」能一对一印证。
                 StringBuilder sb = new StringBuilder();
-                List<RectF> boxes = new ArrayList<>();
+                List<NumBox> boxes = new ArrayList<>();
                 for (TextLine ln : resultLines) {
                     if (ln.text != null) {
                         sb.append(ln.text).append('\n');
                     }
-                    if (ln.box != null && !extractNumbers(ln.text).isEmpty()) {
-                        boxes.add(ln.box);
+                    if (ln.box == null) {
+                        continue;
                     }
+                    String label = extractNumbers(ln.text);
+                    if (label.isEmpty()) {
+                        continue;
+                    }
+                    boxes.add(new NumBox(ln.box, label));
                 }
                 final String text = sb.toString();
                 final int rawLines = resultLines.size();
@@ -1025,7 +1038,7 @@ public class CameraOcrActivity extends AppCompatActivity {
                 }
                 // 补框：同一张位图，overlay 内部判断到是同一个对象就不会回收
                 showGalleryImage(shown, boxes);
-                setStatus("相册识别完成（绿框=识别到的数字，点「继续」恢复实时）", false);
+                setStatus("相册识别完成：绿框标出含数字的行，放大即可看到框里的数字", false);
                 AppLog.i(TAG, "相册识别完成：行 " + rawLines + "，数字 "
                         + countNumbers(numbers) + "，框 " + boxes.size()
                         + "，耗时 " + cost + "ms");
@@ -1416,7 +1429,7 @@ public class CameraOcrActivity extends AppCompatActivity {
      * 同一个 Bitmap 传两次是安全的 —— {@link GalleryOverlay#setImage}
      * 只在「新旧不是同一个对象」时才回收旧的。
      */
-    private void showGalleryImage(Bitmap bmp, List<RectF> boxes) {
+    private void showGalleryImage(Bitmap bmp, List<NumBox> boxes) {
         if (overlay == null || bmp == null) {
             return;
         }
@@ -1510,6 +1523,23 @@ public class CameraOcrActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 一个「数字框」：图上那一行的位置 + 这一行抽出来的数字。
+     *
+     * 与 {@link TextLine} 的区别是语义：TextLine 装识别原文，NumBox 装的
+     * 已经是按本项目规则抽好的数字串（如 {@code "8512"}；一行里有多个数字
+     * 时是 {@code "2 2"}），直接画到框里。
+     */
+    private static final class NumBox {
+        final RectF rect;
+        final String label;
+
+        NumBox(RectF rect, String label) {
+            this.rect = rect;
+            this.label = label;
+        }
+    }
+
     /** 一行识别结果：文本 + 图片像素坐标（没有包围盒时 box 为 null）。 */
     private static final class TextLine {
         final String text;
@@ -1542,10 +1572,17 @@ public class CameraOcrActivity extends AppCompatActivity {
             GestureDetector.OnDoubleTapListener {
 
         private Bitmap image;
-        private final List<RectF> boxes = new ArrayList<>();
+        private final List<NumBox> boxes = new ArrayList<>();
         private final Paint imgPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
         private final Paint boxFill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint boxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        /** 框里的数字：白色实心 + 深色描边，黑白底图上都能读。 */
+        private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint labelEdge = new Paint(Paint.ANTI_ALIAS_FLAG);
+        /** 字号上下限与内边距（像素），构造时算好，onDraw 里别再反复 dp()。 */
+        private final float labelMaxPx;
+        private final float labelMinPx;
+        private final float labelPadPx;
         /** 未缩放时图片所占的屏幕矩形（每次 onDraw 重算）。 */
         private final RectF baseRect = new RectF();
         private final RectF oneBox = new RectF();
@@ -1569,7 +1606,10 @@ public class CameraOcrActivity extends AppCompatActivity {
             setBackgroundColor(0xFF000000);
             setClickable(true);   // 吃掉点击，别穿到下面的预览层去
             roundPx = dp(3);
-            minBoxH = dp(10);
+            // 只在下限以下才撑高，且撑得很少：取件码清单一张图能有 200 多行，
+            // 每行在屏幕上只分到七八像素，撑到 10dp 会让上下相邻的框全部叠住，
+            // 整片糊成绿色。所以能看见就不撑。
+            minBoxH = dp(3);
             baseStroke = dp(1.8f);
             boxPaint.setStyle(Paint.Style.STROKE);
             boxPaint.setStrokeWidth(baseStroke);
@@ -1578,6 +1618,21 @@ public class CameraOcrActivity extends AppCompatActivity {
             // 框内极淡的一层绿，让「这一行被选中」在缩得很小的长图上也能一眼看到
             boxFill.setStyle(Paint.Style.FILL);
             boxFill.setColor(0x223DDC97);
+
+            labelMaxPx = dp(13);
+            // 下限用 dp(3.2) ≈ 11 屏幕像素（560dpi 下）：这是 4 位数字还能
+            // 认出来的最小字号。取 dp(8) 的话等于 28 屏幕像素，而 238 行的
+            // 清单图 1x 时每行只有 6px，得放大 4.7 倍才够 —— 那用户在全景和
+            // 双击 2.5x 下都看不到数字，会以为功能没做。
+            labelMinPx = dp(3.2f);
+            labelPadPx = dp(2.5f);
+            labelPaint.setStyle(Paint.Style.FILL);
+            labelPaint.setColor(0xFFFFFFFF);
+            labelPaint.setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.BOLD));
+            labelEdge.setStyle(Paint.Style.STROKE);
+            labelEdge.setStrokeJoin(Paint.Join.ROUND);
+            labelEdge.setColor(0xE6000000);
+            labelEdge.setTypeface(labelPaint.getTypeface());
 
             gestures = new GestureDetector(context, this);
             gestures.setOnDoubleTapListener(this);
@@ -1596,7 +1651,7 @@ public class CameraOcrActivity extends AppCompatActivity {
             return image;
         }
 
-        void setImage(Bitmap bmp, List<RectF> newBoxes) {
+        void setImage(Bitmap bmp, List<NumBox> newBoxes) {
             Bitmap old = image;
             boolean sameImage = (old == bmp);
             image = bmp;
@@ -1765,6 +1820,67 @@ public class CameraOcrActivity extends AppCompatActivity {
             return false;
         }
 
+        /**
+         * 把这一行抽出的数字写进框里。
+         *
+         * 字号取 {@code min(rawH × 0.78, labelMaxPx)}，rawH 是框在
+         * **当前屏幕上**的真实高度（已含用户缩放），所以放大后数字自然变大，
+         * 直到 labelMaxPx 封顶（免得一个框里顶个巨大数字）。
+         * rawH 低于 labelMinPx 时**整个不画**（不是缩到下限）——
+         * 下限只有约 11 个屏幕像素，再往下就没有字形可言了。
+         *
+         * @param rawH 撑高之前的框高（屏幕像素，已含用户缩放）
+         */
+        private void drawLabel(Canvas canvas, String text, RectF boxRect, float rawH) {
+            if (text == null || text.isEmpty()) {
+                return;
+            }
+            // 屏幕行高不够 → 不画。取件码清单一张图能有 200 多行，3072×4096
+            // 的图缩到手机上每行只剩 6 像素，这种密度下硬画数字只会得到
+            // 一层糊在一起的白色噪点，比空框更难看清。放大到行高够读了再写。
+            if (rawH < labelMinPx) {
+                return;
+            }
+            float fontSize = rawH * 0.78f;
+            if (fontSize > labelMaxPx) {
+                fontSize = labelMaxPx;
+            }
+            labelPaint.setTextSize(fontSize);
+            float avail = boxRect.width() - labelPadPx * 2f;
+            if (avail <= 0) {
+                return;
+            }
+            float measured = labelPaint.measureText(text);
+            if (measured > avail) {
+                fontSize *= avail / measured;
+                if (fontSize < labelMinPx * 0.6f) {
+                    // 框窄到放不下：画出来就是一团白点，不如不画
+                    return;
+                }
+                labelPaint.setTextSize(fontSize);
+            }
+            labelEdge.setTextSize(fontSize);
+            labelEdge.setStrokeWidth(Math.max(1f, fontSize * 0.22f));
+
+            // 垂直居中：用 ascent/descent 摆正基线，别让数字贴着框上沿
+            float baseline = boxRect.centerY()
+                    - (labelPaint.descent() + labelPaint.ascent()) / 2f;
+            // 水平位置夹到视口内：放大后框的左边界可能已经滑到屏幕外，
+            // 数字若还跟着“粘”在框左沿就一起出屏了，看上去仍是空框。
+            float textW = labelPaint.measureText(text);
+            float x = boxRect.left + labelPadPx;
+            float minX = labelPadPx;
+            float maxX = getWidth() - labelPadPx - textW;
+            if (x > maxX) {
+                x = maxX;
+            }
+            if (x < minX) {
+                x = minX;
+            }
+            canvas.drawText(text, x, baseline, labelEdge);
+            canvas.drawText(text, x, baseline, labelPaint);
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
@@ -1802,10 +1918,11 @@ public class CameraOcrActivity extends AppCompatActivity {
             // 否则放大 8 倍时线宽也跟着粗 8 倍，糊成一片。
             float stroke = baseStroke / (float) Math.sqrt(userScale);
             boxPaint.setStrokeWidth(stroke);
-            for (RectF box : boxes) {
-                if (box == null) {
+            for (NumBox nb : boxes) {
+                if (nb == null || nb.rect == null) {
                     continue;
                 }
+                RectF box = nb.rect;
                 // ① 先映射到「未缩放时的屏幕坐标」
                 float l = baseRect.left + box.left * scale;
                 float t = baseRect.top + box.top * scale;
@@ -1818,14 +1935,27 @@ public class CameraOcrActivity extends AppCompatActivity {
                 b = ty + (b - cy) * userScale;
                 // 整张长图缩下来后单行可能只有两三个像素高，框会糊成一条线；
                 // 撑到最小高度，至少能看清「这一行被选中了」。
-                if (b - t < minBoxH) {
+                // 但撑高幅度最多翻倍 —— 238 行的清单图上相邻行只隔 6px，
+                // 一律撑到 minBoxH 会让上下相邻的框直接叠在一起。
+                // rawH 要留「撑高之前」的值：字号该按真实可见高度算，
+                // 按撑高后的值算会得到一个和图上文字毫无关系的字号。
+                float rawH = b - t;
+                float target = Math.min(minBoxH, rawH * 2f);
+                if (rawH < target) {
                     float mid = (t + b) / 2f;
-                    t = mid - minBoxH / 2f;
-                    b = mid + minBoxH / 2f;
+                    t = mid - target / 2f;
+                    b = mid + target / 2f;
                 }
                 oneBox.set(l, t, r, b);
-                canvas.drawRoundRect(oneBox, roundPx, roundPx, boxFill);
+                // 淡绿填充只在「框没被撑高」时才画：
+                // 一旦被撑高，说明真实行高小于 minBoxH，相邻行的间距也同样小，
+                // 一层层半透明绿叠上去会连成整片绿，反而看不出哪一行被选中。
+                // 这时只留描边；放大到 rawH ≥ minBoxH 后填充自然出现。
+                if (rawH >= minBoxH) {
+                    canvas.drawRoundRect(oneBox, roundPx, roundPx, boxFill);
+                }
                 canvas.drawRoundRect(oneBox, roundPx, roundPx, boxPaint);
+                drawLabel(canvas, nb.label, oneBox, rawH);
             }
         }
     }
