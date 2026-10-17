@@ -64,6 +64,8 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -161,6 +163,15 @@ import java.util.regex.Pattern;
  * 图在哪框就在哪，不会出现两层各自缩放导致的错位。
  */
 public class CameraOcrActivity extends AppCompatActivity {
+
+    /** 横向重叠达到两者较小宽的这个比例，才认为两框在同一列、构成上下邻居。 */
+    private static final float LOCAL_OVERLAP_RATIO = 0.5f;
+
+    /** 框数超过这个值就跳过 O(n²) 的局部约束，只做全局兜底（防卡界面）。 */
+    private static final int MAX_LOCAL_BOXES = 1500;
+
+    /** 全局兜底：框高超过「中位框高 × 此倍数」视为离群，压掉。 */
+    private static final float OUTLIER_H_RATIO = 3.0f;
 
     private static final String TAG = "XSOCR-Camera";
 
@@ -1156,7 +1167,7 @@ public class CameraOcrActivity extends AppCompatActivity {
         if (h <= CHUNK_H * 3 / 2) {
             chunkCount[0] = 1;
             lastError = null;
-            String json = recognizeJson(bmp, 2);
+            String json = recognizeJson(bmp, 3);
             List<TextLine> once = parseLines(json);
             if (lastError != null) {
                 return null;
@@ -1186,7 +1197,7 @@ public class CameraOcrActivity extends AppCompatActivity {
             }
             try {
                 lastError = null;
-                String json = recognizeJson(sub, 2);
+                String json = recognizeJson(sub, 3);
                 List<TextLine> part = parseLines(json);
                 if (lastError != null) {
                     return null;
@@ -1554,10 +1565,19 @@ public class CameraOcrActivity extends AppCompatActivity {
     }
 
     /**
-     * 解析 recognize(type=2) 的结果：每行取 text 与包围盒。
+     * 解析 recognize(type=3) 的结果：每行取 text 与包围盒。
      *
      * 与 {@link #parseTexts} 的唯一区别是保留坐标（要画框）。
      * 出错时同样返回 null 并置 {@link #lastError}。
+     *
+     * 【为什么是 3 而不是 2】两个引擎的 type 语义并不一致，这是实测结论：
+     *   native（PP-OCR）: type=2 只给**中心点** x/y；type=3 才是左上角 + w/h
+     *   ML Kit          : type>=2 就给 x/y/w/h 全套
+     * 原先统一用 2，换成 native 之后每行都缺 w/h，于是 box 恒为 null、
+     * 一个绿框都画不出来。改用 3 之后两边都拿得到完整矩形。
+     *
+     * 【同时兼容只有点的输出】若某项只给了 x/y（没有 w/h），这里估一个框
+     * 而不是直接丢弃 —— 宁可有框位置略偏，也不要整片空。
      */
     private List<TextLine> parseLines(String json) {
         if (json == null) {
@@ -1590,22 +1610,158 @@ public class CameraOcrActivity extends AppCompatActivity {
                 }
                 String text = item.get("text").getAsString();
                 RectF box = null;
-                if (item.has("x") && item.has("y") && item.has("w") && item.has("h")) {
+                if (item.has("x") && item.has("y")) {
                     int x = item.get("x").getAsInt();
                     int y = item.get("y").getAsInt();
-                    int w = item.get("w").getAsInt();
-                    int h = item.get("h").getAsInt();
-                    // 坐标 <0 表示这一行没给包围盒，别画到左上角去
-                    if (x >= 0 && y >= 0 && w > 0 && h > 0) {
-                        box = new RectF(x, y, x + w, y + h);
+                    // 坐标 <0 表示这一行没给坐标，别画到左上角去
+                    if (x >= 0 && y >= 0) {
+                        int w = item.has("w") ? item.get("w").getAsInt() : 0;
+                        int h = item.has("h") ? item.get("h").getAsInt() : 0;
+                        if (w > 0 && h > 0) {
+                            // 完整矩形：type=3 的正常路径
+                            box = new RectF(x, y, x + w, y + h);
+                        } else {
+                            // 只有中心点：按字数估一个框兜底，别让整张图空着
+                            box = guessBoxFromPoint(x, y, text);
+                        }
                     }
                 }
                 out.add(new TextLine(text, box));
             }
+            // 五、把失真的框高压回真实行高（实测 native 的 h 约为行高 3~6 倍）
+            fitBoxToLineHeight(out);
             return out;
         } catch (Throwable t) {
             lastError = t.toString();
             return null;
+        }
+    }
+
+    /**
+     * 只拿到中心点时，按字数估一个框。
+     *
+     * 【为什么需要】native 的 type=2 只输出中心点。虽然本页已改用 type=3
+     * 拿完整矩形，但保留这条兜底：万一某个引擎的输出退化到只给点，
+     * 也不至于整张图一个框都没有 —— 那正是这次「绿框全没了」的直接原因。
+     *
+     * 【怎么估】没有真实字号可用，只能按字符数粗略算：
+     *   · 高度：{@code max(12, 14 × √字符数)}，用平方根是为了让长句的行高
+     *     增长得慢一些，别把一行 20 字的框估成 280px 高；
+     *   · 宽度：高度 × 0.62（等宽字体的字宽比）× 字符数。
+     * 只是个位置提示，不追求精确 —— 精确框要等 type=3 的完整矩形。
+     */
+    private static RectF guessBoxFromPoint(int cx, int cy, String text) {
+        int n = (text == null) ? 0 : text.length();
+        if (n <= 0) {
+            n = 1;
+        }
+        // 长行别把框估成一条横贯全图的线
+        int capped = Math.min(n, 40);
+        float h = Math.max(12f, (float) (Math.sqrt(capped) * 14f));
+        float w = Math.max(h * 0.62f * n, h);
+        float left = cx - w / 2f;
+        float top = cy - h / 2f;
+        return new RectF(left, top, left + w, top + h);
+    }
+
+    /**
+     * 把失真的框高压回真实行高。
+     *
+     * 【为什么需要】native（PP-OCR）给出的 {@code h} 是文字检测框的外接矩形，
+     * 不是文字的实际高度。对 3072×4096 的取件码长图实测（type=3，466 个框）：
+     * <pre>
+     *   框高 h 的 min / 中位 / max = 8 / 50 / 319   （单字符 "5" 给了 h=110）
+     *   按 4096 / 238 行算，真实行高约 17.2px
+     * </pre>
+     * 即 {@code h} 约为真实行高的 3~6 倍。照原样画，上下相邻的框大面积重叠，
+     * 半透明绿填充（alpha 34）层层叠加，整片糊成一块绿 —— 那就等于没框。
+     *
+     * 【为什么不用「全局行距中位数」】试过，不成立：这份数据里有大量 1~4px
+     * 的小间距（同一个视觉行被切成多段、同一行被拆成多个 token），把中位数
+     * 拉到 9px，而真实行高是 17.2px。按 9×1.6=14.4px 封顶，1x 下屏幕只剩
+     * 5px，绿框里的数字全被 {@code labelMinPx} 挡掉不画 —— 为了修重叠把
+     * 标签功能废掉了，不划算。
+     *
+     * 【现在怎么做】不猜「行距」这种全局量，改成逐框局部约束：
+     * <ol>
+     *   <li>对每个框，只找横向**确实**与它重叠的框
+     *       （重叠宽度 ≥ 两者较小宽的 {@link #LOCAL_OVERLAP_RATIO}）；</li>
+     *   <li>取这些框里「中心 y 距离」最小的值当 gap —— 那就是它最近的上下
+     *       邻居，gap 即真实行距；</li>
+     *   <li>框高超过 gap 就压到 gap，保持纵向中心不变（压到 gap 时两框相切）；</li>
+     *   <li>压完再做一次全局兜底：超过「框高中位数 × {@link #OUTLIER_H_RATIO}」
+     *       的孤立大框也压掉，免得某个离群框仍然铺满一片。</li>
+     * </ol>
+     * 只压不放 —— 小框保持原样，避免把正常的框放大后吞掉邻居。
+     * 框数少于 3 时不做处理：样本太少，邻居关系不可靠。
+     */
+    private static void fitBoxToLineHeight(List<TextLine> lines) {
+        if (lines == null || lines.size() < 3) {
+            return;
+        }
+        List<RectF> boxes = new ArrayList<>();
+        for (TextLine ln : lines) {
+            if (ln.box != null) {
+                boxes.add(ln.box);
+            }
+        }
+        int n = boxes.size();
+        if (n < 3) {
+            return;
+        }
+        // 一、逐框压到「最近上下邻居的中心距」
+        if (n <= MAX_LOCAL_BOXES) {
+            for (int a = 0; a < n; a++) {
+                RectF box = boxes.get(a);
+                float cy = box.centerY();
+                float gap = -1f;
+                for (int b = 0; b < n; b++) {
+                    if (a == b) {
+                        continue;
+                    }
+                    RectF other = boxes.get(b);
+                    // 横向不重叠的框不算上下邻居（同一行被切成多段的情形）
+                    float overlapW = Math.min(box.right, other.right)
+                            - Math.max(box.left, other.left);
+                    if (overlapW < Math.min(box.width(), other.width())
+                            * LOCAL_OVERLAP_RATIO) {
+                        continue;
+                    }
+                    float d = other.centerY() - cy;
+                    if (d < 0f) {
+                        d = -d;
+                    }
+                    if (d < 1f) {
+                        continue;
+                    }
+                    if (gap < 0f || d < gap) {
+                        gap = d;
+                    }
+                }
+                if (gap > 0f && box.height() > gap) {
+                    box.top = cy - gap / 2f;
+                    box.bottom = cy + gap / 2f;
+                }
+            }
+        }
+        // 二、全局兜底：离群大框压到中位框高的固定倍数
+        float[] hs = new float[n];
+        for (int a = 0; a < n; a++) {
+            hs[a] = boxes.get(a).height();
+        }
+        Arrays.sort(hs);
+        float cap = hs[n / 2] * OUTLIER_H_RATIO;
+        if (cap <= 0f) {
+            return;
+        }
+        for (int a = 0; a < n; a++) {
+            RectF box = boxes.get(a);
+            if (box.height() <= cap) {
+                continue;
+            }
+            float cy = box.centerY();
+            box.top = cy - cap / 2f;
+            box.bottom = cy + cap / 2f;
         }
     }
 
