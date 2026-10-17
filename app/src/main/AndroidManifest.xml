@@ -3,6 +3,19 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      摄像头实时识别（CameraOcrActivity）。
+      required=false：没有摄像头的设备（电视、部分平板）照样能安装本应用，
+      只是那一页打不开 —— 其余 OCR / 手势功能完全不受影响。
+      权限是运行时申请的（进那一页时才要），不在启动时骚扰用户。
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
 
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -387,6 +400,20 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:label="滑动菜单" />
+        <!--
+          摄像头实时识别页。
+          · 锁定竖屏：预览的旋转补偿按竖屏算好了，允许横屏还得再补一套
+            方向换算，收益不大。
+          · adjustResize：底部结果面板要能跟着输入法/系统栏变化。
+          · exported=false：只从「OCR设置」这张卡片进，外部无权拉起
+            （拉起就会占用摄像头，对用户是骚扰）。
+        -->
+        <activity
+            android:name=".CameraOcrActivity"
+            android:exported="false"
+            android:label="摄像头实时识别"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".EdgeGestureService"
             android:enabled="true"

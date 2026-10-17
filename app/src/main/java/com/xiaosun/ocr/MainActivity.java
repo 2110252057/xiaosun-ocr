@@ -1114,6 +1114,56 @@ public class MainActivity extends AppCompatActivity {
         parent.addView(capCard, cardLp());
         updateCaptureInfo();
 
+        // ---------- 摄像头实时识别 ----------
+        // 放在「截屏识别」之后、「图片预览」之前：
+        // 它是另一条「输入源」，和「从文件选图」是同类，挨着放最符合阅读顺序。
+        addSectionTitle(parent, "摄像头实时识别");
+
+        LinearLayout camCard = new LinearLayout(this);
+        camCard.setOrientation(LinearLayout.VERTICAL);
+        camCard.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
+        camCard.setElevation(dp(1));
+        camCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+
+        TextView camTitle = new TextView(this);
+        camTitle.setText("对准数字，自动识别");
+        camTitle.setTextSize(14.5f);
+        camTitle.setTypeface(null, Typeface.BOLD);
+        camTitle.setTextColor(C_TEXT);
+        camCard.addView(camTitle);
+
+        TextView camDesc = new TextView(this);
+        camDesc.setText("调起后置摄像头，连续识别画面里的数字（小票、电表、车牌都行）。"
+                + "识别在本机完成，不联网、不上传。\n"
+                + "结果只保留数字，点一下就能复制。");
+        camDesc.setTextSize(12f);
+        camDesc.setTextColor(C_TEXT_SUB);
+        camDesc.setLineSpacing(0f, 1.35f);
+        camDesc.setPadding(0, dp(6), 0, 0);
+        camCard.addView(camDesc);
+
+        TextView camWarn = new TextView(this);
+        camWarn.setText("⚠ 实时识别比较耗电，长时间使用机身会发热；用完记得退出这一页。");
+        camWarn.setTextSize(11f);
+        camWarn.setTextColor(C_HINT);
+        camWarn.setLineSpacing(0f, 1.3f);
+        camWarn.setPadding(0, dp(8), 0, 0);
+        camCard.addView(camWarn);
+
+        Button btnCamera = primaryButton("打开摄像头识别");
+        LinearLayout.LayoutParams camBtnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        camBtnLp.topMargin = dp(12);
+        camCard.addView(btnCamera, camBtnLp);
+        btnCamera.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(this, CameraOcrActivity.class));
+            } catch (Throwable t) {
+                toast("打不开摄像头页面：" + t.getClass().getSimpleName());
+            }
+        });
+        parent.addView(camCard, cardLp());
+
         // ---------- 图片预览框 ----------
         addSectionTitle(parent, "图片预览");
 

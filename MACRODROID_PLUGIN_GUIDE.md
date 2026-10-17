@@ -1052,6 +1052,7 @@ Tasker 的变量协议只认 String / String[] / ArrayList&lt;String&gt;，
 | **截屏方式（三条）** | 无障碍（免授权，API 30+）→ root → MediaProjection，自动挑选 |
 | **无障碍截图能力** | `CAPABILITY_CAN_TAKE_SCREENSHOT` + `takeScreenshot()`，同为 API 30 |
 | **无障碍服务隐私** | 不声明 `accessibilityEventTypes`，`onAccessibilityEvent` 空实现 |
+| **摄像头实时识别** | 独立页 `CameraOcrActivity`（Camera2，不引 CameraX）；结果只保留数字，不进插件链路 |
 
 ---
 
