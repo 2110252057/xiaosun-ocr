@@ -20,6 +20,8 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.util.List;
+
 /**
  * Locale/Tasker 插件的「配置界面」。
  *
@@ -50,6 +52,10 @@ public class PluginEditActivity extends Activity {
     /** 手势事件配置区（仅触发器模式可见）。 */
     private LinearLayout gestureGroup;
     private Spinner gsDirSpinner;
+    /** 「滑过之后干什么」下拉：跟随手柄 / 直触 / 菜单。 */
+    private Spinner gsModeSpinner;
+    /** 这条提示随方向与模式联动，比如「任意方向 + 直触」无法落盘。 */
+    private TextView gsModeHint;
     private CheckBox gsStrict;
     /**
      * 宿主用什么 action 打开了本界面，决定这是「动作」还是「触发器」。
@@ -108,6 +114,30 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
             "向下 ↓", "左下 ↙", "向左 ←", "左上 ↖",
     };
 
+    /**
+     * 手势事件「滑过之后干什么」下拉项。
+     *
+     * 索引与 {@code GS_MODE_* } 常量一一对应：
+     *   0 = 不指定（跟随手柄侧该方向自己的设置）
+     *   1 = 直触（不弹菜单，抬手立刻发事件）
+     *   2 = 菜单（弹菜单，选中图标才发事件）
+     *
+     * ── 为什么这个选择要写进手柄配置，而不是只存进宏 ──────────────
+     * 菜单是在**插件被查询之前**弹的：滑过阈值那一刻服务就要决定
+     * 「弹还是不弹」，此时它根本还没收到宿主的 REQUEST_QUERY，
+     * 也就无从知道这次滑动属于哪个宏、那个宏想不想弹菜单。
+     * 所以这个开关必须落在「手柄的某个方向」上，服务才能在滑动当场读到。
+     *
+     * 界面上直接改的就是那份设置 —— 所见即所存，不做影子配置，
+     * 免得出现「触发器里选了直触、手柄里还是菜单」的两处打架。
+     */
+    private static final String[] GS_MODES = {
+            "跟随手柄（默认）", "直触 · 不弹菜单", "菜单 · 选中才发事件",
+    };
+    private static final int GS_MODE_FOLLOW = 0;
+    private static final int GS_MODE_DIRECT = 1;
+    private static final int GS_MODE_MENU = 2;
+
     private int C_TEXT, C_SUB, C_HINT, C_BRAND, C_DIVIDER, C_SURFACE;
 
     @Override
@@ -140,6 +170,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
             try {
                 old = it.getBundleExtra(PluginContract.EXTRA_BUNDLE);
             } catch (Throwable ignored) {
+                // 宿主给的 bundle 反序列化失败就当作没有旧配置，降级为新建。
             }
         }
         // 老配置里带的 plugin_mode 优先（宿主回填时更权威）。
@@ -164,9 +195,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         root.addView(title, wide());
         if (triggerMode) {
             TextView sub = new TextView(this);
-            sub.setText("边缘滑动手柄被滑过时触发这个宏。"
-                    + "手柄的位置、方向、触发距离等外观参数在 App 的"
-                    + "「滑动触发」页里调；这里只决定监听哪个方向。");
+            sub.setText("滑动手柄被滑过时触发这个宏。外观参数在「滑动触发」页里调，这里只决定监听哪个方向。");
             sub.setTextSize(11.5f);
             sub.setTextColor(C_HINT);
             sub.setLineSpacing(0f, 1.35f);
@@ -261,6 +290,45 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         gsDirHint.setTextColor(C_HINT);
         gsDirHint.setLineSpacing(0f, 1.3f);
         gestureGroup.addView(gsDirHint, wideTop(4));
+
+        // ---------- 滑过之后干什么 ----------
+        //
+        // 这个下拉改的是**手柄上该方向的设置**，不是仅存进宏的私有值。
+        // 原因见 GS_MODES 的注释：菜单是在插件被查询之前弹的，
+        // 服务必须能在滑动当场读到「这个方向要不要弹菜单」。
+        gestureGroup.addView(sectionLabel("滑过之后"), wideTop(14));
+        gsModeSpinner = new Spinner(this);
+        gsModeSpinner.setAdapter(spinnerAdapter(GS_MODES));
+        gestureGroup.addView(gsModeSpinner, wide());
+        gsModeHint = new TextView(this);
+        gsModeHint.setTextSize(11);
+        gsModeHint.setTextColor(C_HINT);
+        gsModeHint.setLineSpacing(0f, 1.3f);
+        gestureGroup.addView(gsModeHint, wideTop(4));
+        gsModeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                updateGsModeHint();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+                updateGsModeHint();
+            }
+        });
+        // 方向一变，模式下拉的可用性也跟着变（任意方向不允许选直触）。
+        gsDirSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                syncGsModeEnabled();
+                updateGsModeHint();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+
         gsStrict = new CheckBox(this);
         gsStrict.setText("校验收到的消息（防伪造触发）");
         gsStrict.setTextSize(13);
@@ -299,9 +367,9 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         modeLp.topMargin = dp(8);
         matchGroup.addView(matchModeSpinner, modeLp);
         TextView matchHint = new TextView(this);
-        matchHint.setText("「包含文本」：文本块里含这几个字就算找到（如「确定」能匹配「确定提交」）。\n"
-                + "「匹配文本」：整个文本块必须与它完全一致。\n"
-                + "不区分大小写；命中后坐标变量为该文本块左上角坐标。");
+        matchHint.setText("「包含文本」：含这几个字就算找到。\n"
+                + "「匹配文本」：必须完全一致。\n"
+                + "不区分大小写；命中后坐标取该文本块左上角。");
         matchHint.setTextSize(11);
         matchHint.setTextColor(C_HINT);
         LinearLayout.LayoutParams matchHintLp = wide();
@@ -370,6 +438,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
                         android.view.WindowManager.LayoutParams.WRAP_CONTENT);
             }
         } catch (Throwable ignored) {
+            // 改窗口尺寸只是兜底手段，某些 ROM 拒绝 setLayout 时仍能靠主题尺寸显示。
         }
 
         if (old != null) applyOld(old);
@@ -415,26 +484,21 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         // 变量说明也要换一套：触发器模式下根本没有识别文本可回传。
         if (varsNote != null) {
             varsNote.setText(triggerMode
-                    ? "滑动菜单的选中结果会交给宏：\n"
+                    ? "滑动菜单的选中结果交给宏：\n"
                     + "  菜单索引    选中了第几项（从 0 开始；-1 = 取消）\n"
                     + "  菜单文字    选中项的名字\n"
                     + "  菜单动作    选中项的动作值\n"
-                    + "\n变量叫什么名字由你在 MacroDroid 里自己定，\n"
-                    + "本应用不预设名字，按你起的名接值就行。\n"
-                    + "\n方向在触发器里就选好了，方向不符的宏根本不会被触发，\n"
-                    + "宏里不需要再判断方向。"
-                    : "识别结果会作为变量交给宏：\n"
+                    + "变量名你自己在 MacroDroid 里定。方向已在触发器里选好，宏里不用再判断。"
+                    : "识别结果作为变量交给宏：\n"
                     + "  识别文本    识别出的全部文字\n"
                     + "  是否找到    指定文本是否存在（true / false）\n"
-                    + "  坐标X       命中处的 x 坐标（整数）\n"
-                    + "  坐标Y       命中处的 y 坐标（整数）\n"
+                    + "  坐标X       命中处的 x 坐标\n"
+                    + "  坐标Y       命中处的 y 坐标\n"
                     + "  错误信息    失败时才有内容\n"
                     + "  耗时(ms)    本次识别耗时\n"
                     + "  模型档位    tiny / small / rapid\n"
-                    + "\n变量叫什么名字由你在 MacroDroid 里自己定，\n"
-                    + "本应用不预设名字，按你起的名接值就行。\n"
-                    + "\n坐标基于截图原始像素，可直接用于点击坐标。\n"
-                    + "未找到时 x / y 为 -1。");
+                    + "变量名你自己在 MacroDroid 里定。坐标是截图原始像素，"
+                    + "可直接用于点击；未找到时 x / y 为 -1。");
         }
     }
 
@@ -461,6 +525,133 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         String dir = b.getString(PluginContract.KEY_GS_DIR, "");
         gsDirSpinner.setSelection(gsDirIndex(dir), false);
         gsStrict.setChecked(b.getBoolean(PluginContract.KEY_GS_STRICT, true));
+
+        // 「滑过之后」这一项没有自己的持久化值 —— 它显示的就是手柄上该方向的
+        // 当前设置。所以重新打开配置界面时，要按真实状态回填，
+        // 否则会显示成「跟随手柄」，让用户以为这里有独立配置。
+        int gsMode = GS_MODE_FOLLOW;
+        if (gsModeSpinner != null) {
+            if (!dir.isEmpty()) {
+                gsMode = EdgeGesturePrefs.isMenuForDir(this, dir)
+                        ? GS_MODE_MENU : GS_MODE_DIRECT;
+            }
+            gsModeSpinner.setSelection(gsMode, false);
+        }
+        syncGsModeEnabled();
+        updateGsModeHint();
+    }
+
+    /**
+     * 检查「本触发器要的方向」在手柄侧是否已经开启。
+     *
+     * 【它只负责提示，不负责修改】
+     * 插件配置与手柄方向现在各自独立：本方法只读 {@link EdgeGesturePrefs#getHandles}
+     * 判断目标方向有没有被任何手柄打开，绝不写回。
+     *
+     * 之所以要有它，是因为解耦之后多了一个新的失败现场：
+     * 插件里选了「向左下」，但手柄八个方向全关 —— 滑了不会有事件，
+     * 宏永远不触发，而界面上看起来一切正常。
+     * 与其让用户去猜，不如保存时说一句。
+     *
+     * @param dir 方向名；空串 = 任意方向（此时只要有一个方向开着就算就绪）
+     * @return true = 手柄侧能滑出这个方向
+     */
+    private boolean checkDirReady(String dir) {
+        boolean any = dir == null || dir.isEmpty();
+        int idx = any ? -1 : gsDirIndex(dir) - 1;
+        boolean ok = false;
+        // 该方向若走菜单，就得提醒「滑了只是弹菜单，选中图标才发事件」。
+        // 这是解耦后第二类新的失败现场：方向开着、宏也配了，但用户在
+        // 菜单上没选图标，宿主收不到事件，宏看起来还是不触发。
+        boolean menuMode = false;
+        try {
+            List<EdgeGesturePrefs.Handle> all = EdgeGesturePrefs.getHandles(this);
+            if (all != null) {
+                for (EdgeGesturePrefs.Handle h : all) {
+                    if (h == null || h.enabled == null) continue;
+                    if (any) {
+                        for (boolean b : h.enabled) {
+                            if (b) { ok = true; break; }
+                        }
+                    } else if (idx >= 0 && idx < h.enabled.length) {
+                        ok = h.enabled[idx];
+                        // 一个方向只要在某个手柄上是直触，就不算「必须走菜单」。
+                        if (ok && !h.menuOf(idx)) menuMode = false;
+                        else if (ok) menuMode = true;
+                    }
+                    if (ok && !menuMode) break;
+                }
+            }
+        } catch (Throwable t) {
+            // 读配置失败时不要拦着用户保存，当作就绪处理
+            return true;
+        }
+        if (!ok) {
+            // 提示里直接把路径说全：方向开关不在本页，在手柄编辑页的
+            // 「可触发方向」那一栏（每个方向一个开关 + 一个触发距离）。
+            // 光说「去打开」用户会在这页里找不到，所以写到具体位置。
+            String what = (any || idx < 0 || idx >= EdgeGesturePrefs.DIR_LABELS.length)
+                    ? "任何方向" : EdgeGesturePrefs.DIR_LABELS[idx];
+            Toast.makeText(this,
+                    "已保存。但手柄目前没开「" + what + "」，滑了不会有事件。\n"
+                            + "去这里开：返回首页 →「滑动触发」→ 点一个手柄 →「可触发方向」。",
+                    Toast.LENGTH_LONG).show();
+        } else if (menuMode && !any) {
+            // 只提示一次、不重复弹第二个 Toast（两个 Toast 会排队，前一个还没
+            // 消失第二个就盖上来，看着像卡了）。
+            Toast.makeText(this,
+                    "已保存。注意「" + EdgeGesturePrefs.DIR_LABELS[idx]
+                            + "」当前是「菜单」模式：滑了会先弹菜单，选中图标后才触发宏。\n"
+                            + "想滑一下就直接触发，去这里改成「直触」：返回首页 →「滑动触发」"
+                            + "→ 点一个手柄 →「可触发方向」。",
+                    Toast.LENGTH_LONG).show();
+        }
+        return ok;
+    }
+    /**
+     * 方向变化时决定「滑过之后」这个下拉能不能用。
+     *
+     * 「任意方向」+「直触」是个说不通的组合，必须挡住：
+     * 菜单只有一个总开关，八个方向共用。若把八向都设成直触，
+     * 菜单就再也不会出现，等于把这个人辛苦配好的菜单整个关掉。
+     * 这种「一次改八向、还带副作用」的操作不该由一个下拉悄悄完成。
+     *
+     * 所以：选了「任意方向」时，这个下拉置灰，只能「跟随手柄」，
+     * 要按方向配，就先在上面选定具体方向。
+     */
+    private void syncGsModeEnabled() {
+        if (gsModeSpinner == null) return;
+        boolean any = gsDirSpinner == null || gsDirSpinner.getSelectedItemPosition() <= 0;
+        if (any && gsModeSpinner.getSelectedItemPosition() != GS_MODE_FOLLOW) {
+            gsModeSpinner.setSelection(GS_MODE_FOLLOW, false);
+        }
+        gsModeSpinner.setEnabled(!any);
+        gsModeSpinner.setAlpha(any ? 0.45f : 1f);
+    }
+
+    /** 按当前方向 + 模式刷新那行小字说明。 */
+    private void updateGsModeHint() {
+        if (gsModeHint == null) return;
+        boolean any = gsDirSpinner == null || gsDirSpinner.getSelectedItemPosition() <= 0;
+        if (any) {
+            gsModeHint.setText("「任意方向」时这一项不可选：整片设置会把八个方向一起改掉，"
+                    + "菜单可能因此整个消失。想按方向配，先在上面选定一个具体方向。");
+            return;
+        }
+        int pos = gsDirSpinner.getSelectedItemPosition();
+        String label = EdgeGesturePrefs.DIR_LABELS[pos - 1];
+        int mode = gsModeSpinner == null ? GS_MODE_FOLLOW
+                : gsModeSpinner.getSelectedItemPosition();
+        if (mode == GS_MODE_DIRECT) {
+            gsModeHint.setText("滑「" + label + "」不弹菜单，抬手立刻把事件发给宏。\n"
+                    + "注意：这是手柄级别的设置，同一方向上别的宏也会一起变成直触。");
+        } else if (mode == GS_MODE_MENU) {
+            gsModeHint.setText("滑「" + label + "」会先弹出菜单，选中图标后才把事件发给宏。\n"
+                    + "没选中任何图标就抬手 → 不发事件，宏不会触发。");
+        } else {
+            gsModeHint.setText("不改动手柄设置，按手柄里「" + label
+                    + "」当前的设定走（默认是菜单）。");
+        }
     }
 
     /** 方向名 → 下拉索引。0 = 任意方向，1..8 = DIR_KEYS 顺序。 */
@@ -496,25 +687,63 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
                     ? "任意方向"
                     : EdgeGesturePrefs.DIR_LABELS[gsDirIndex(dir) - 1];
 
-            // ★ 把这里选的方向**排他地**同步到手柄的可触发方向。
+            // ★ 这里**只读不写**：绝不再去改动手柄的可用方向。
             //
-            //   不这么做的话，用户在触发器里选了"向上"，回到 App 一看
-            //   手柄的"向上"根本没开，滑了不触发 —— 还得去手柄编辑页
-            //   再勾一次，两处配置割裂。
+            //   原先这里调 EdgeGesturePrefs.setDirectionsForAllHandles(this, dir)，
+            //   语义是「排他覆盖」—— 选中的开、其余七向全关。
+            //   结果是：配了第二个触发器就把第一个的方向关掉了。
+            //   用户「配了左下 + 左上，只有后配的左上生效」就是这么来的：
+            //   第二个触发器保存时把 down_left 关了，左下滑根本不会触发，
+            //   插件连事件都收不到，宏自然不跑。
             //
-            //   是**排他**覆盖而非追加：触发器选哪个就只留哪个。
-            //   否则从"左下"改成"左上"后左下还开着，左下滑一下照样触发，
-            //   宏会跑在意料之外的方向上。想同时听多个方向，到手柄编辑页手动开。
-            int changed = EdgeGesturePrefs.setDirectionsForAllHandles(this, dir);
-            if (changed > 0) {
-                // 让运行中的悬浮窗服务立刻重建，改完即生效，不用等下次滑动。
-                EdgeGestureService.reload(this);
-            }
-            AppLog.i("XSOCR-Plugin", "触发器方向已同步到手柄: 方向="
-                    + (dir.isEmpty() ? "(任意)" : dir)
-                    + " 方向变动数=" + changed);
+            //   现在两者彻底解耦：
+            //     · 插件配置 = 「哪个方向算我的」（由 dirMatches 判定）
+            //     · 手柄方向 = 「能滑出哪些方向」（在「滑动触发」页里开）
+            //   一份职责一个地方，配多少个触发器都不会互相踩。
+            //
+            //   代价：若手柄侧没开这个方向，滑了不会有事件。
+            //   这正是下面 checkDirReady() 要提前告知用户的事。
 
-            blurb = "滑动 " + dirLabel;
+            // ---------- 先应用「滑过之后」，再检查 ----------
+            //
+            // ★ 顺序很重要：checkDirReady() 会按手柄当前状态判断这个方向
+            //   是不是「菜单模式」并据此提示。如果先检查再写入，用户刚把
+            //   它选成直触，却会收到一句「注意当前是菜单模式」—— 说的还是
+            //   改动前的旧状态，纯属自找困惑。所以先落盘，再按新状态检查。
+            //
+            // ★ 为什么这个开关要写进手柄配置、而不是只存进宏的 cfg：
+            //   菜单是在插件被查询**之前**弹的。滑过阈值那一刻，服务要立刻
+            //   决定弹不弹，而此时它还没收到宿主的 REQUEST_QUERY，不可能知道
+            //   「这次滑动属于哪个宏、那个宏想不想弹」。所以它只能落在
+            //   手柄的该方向上，服务当场才读得到。
+            //
+            //   「任意方向」时这个下拉是禁用的（见 syncGsModeEnabled），
+            //   取到的必然是「跟随手柄」，这里什么都不会改。
+            int mode = gsModeSpinner == null ? GS_MODE_FOLLOW
+                    : gsModeSpinner.getSelectedItemPosition();
+            // 真正落到手柄上了才把模式写进卡片副标题 —— 没改动的时候
+            // 描述里不该多出一个本次操作根本没做的后缀。
+            String appliedModeSuffix = "";
+            if (!dir.isEmpty() && mode != GS_MODE_FOLLOW) {
+                boolean wantMenu = (mode == GS_MODE_MENU);
+                int changed = EdgeGesturePrefs.setMenuForDir(this, dir, wantMenu);
+                AppLog.i("XSOCR-Plugin", "「滑过之后」已应用: 方向=" + dir
+                        + " 模式=" + (wantMenu ? "菜单" : "直触")
+                        + " 改动处数=" + changed);
+                // saveHandles 只写了磁盘，服务手里还是重建时抓到的旧 Handle 对象，
+                // 不重建的话这次改动要等下次重启服务才生效。有改动才重建，
+                // 免得每次保存都无谓地把悬浮窗摘一遍再挂回去。
+                if (changed > 0) {
+                    EdgeGestureService.reload(this);
+                    appliedModeSuffix = wantMenu ? " · 菜单" : " · 直触";
+                }
+            }
+            boolean ready = checkDirReady(dir);
+            AppLog.i("XSOCR-Plugin", "触发器方向已保存: 方向="
+                    + (dir.isEmpty() ? "(任意)" : dir)
+                    + " 手柄已开启=" + ready);
+
+            blurb = "滑动 " + dirLabel + appliedModeSuffix;
             if (PluginContract.MODE_EVENT.equals(pluginMode) && !strict) {
                 blurb += " · 不校验消息";
             }

@@ -121,6 +121,7 @@ public class PluginConditionReceiver extends BroadcastReceiver {
             try {
                 setResultCode(code);
             } catch (Throwable ignored) {
+                // 宿主进程可能已经死了，setResultCode 会抛；此时结果已经写不回去，忽略。
             }
         }
 

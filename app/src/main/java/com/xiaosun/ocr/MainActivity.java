@@ -122,16 +122,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvStatusText;
     /** 状态卡副标题（接口地址）。关闭时它不该继续显示一个没人监听的地址。 */
     private TextView tvStatusSub;
+    /** 保活提示行：未加入电池优化白名单时才显示。 */
     private TextView tvBatteryText;
-    private View batteryCard;
     private boolean serviceStarting = false;
-    /**
-     * 初始化 Switch 期间抑制回调。
-     *
-     * setChecked() 本身就会触发一次 OnCheckedChangeListener，
-     * 若不管它，打开设置页的瞬间就会平白重建一次 task。
-     */
-    private boolean suppressRecentsToggle = false;
     /**
      * 「手势正在启动…」状态的重试计数与开关。
      *
@@ -231,6 +224,15 @@ public class MainActivity extends AppCompatActivity {
         // 「滑动菜单」的开关与项数是在子页里改的，返回本页必须重读，
         // 否则卡片上还写着进来时那次的旧状态。
         refreshMenuCard();
+        /*
+         * 保活状态也可能在这次离开期间变了：用户可能刚去系统设置里把本应用
+         * 加进电池优化白名单，也可能在「⋮」菜单里切了「从最近任务隐藏」。
+         * ensureServiceRunning() 在本页早已运行时是直接 return 的，不会
+         * 顺手刷新；所以这里必须显式刷一次，否则那条「⚠ 未加入白名单」的
+         * 警示行会一直挂在已加白的机器上。（refreshStatus 里全是 null 检查，
+         * 页面还没建好时调也安全，重复调是幂等的。）
+         */
+        refreshStatus();
     }
 
     /**
@@ -322,8 +324,19 @@ public class MainActivity extends AppCompatActivity {
         sub.setTextSize(11.5f);
         sub.setTextColor(0xCCFFFFFF);
         column.addView(sub);
+        bar.addView(column, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        bar.addView(column);
+        // 右上角「⋮」：日志 + 隐藏任务 + 保活。
+        // 后两项是「配一次就不动」的设置，页面里不再占卡片。
+        View more = LogCard.buildMenuButton(this,
+                // 传 Title 而不是 String：菜单每次打开都要现算状态，
+                // 否则切完「从最近任务隐藏」再打开菜单，看到的还是旧文案。
+                new LogCard.MenuItem(this::recentsMenuTitle, this::toggleHideFromRecents),
+                new LogCard.MenuItem(this::keepAliveMenuTitle, this::openBatteryWhitelist));
+        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(dp(40), dp(40));
+        bar.addView(more, moreLp);
+
         return bar;
     }
 
@@ -403,7 +416,6 @@ public class MainActivity extends AppCompatActivity {
         tvStatusText = null;
         tvStatusSub = null;
         tvBatteryText = null;
-        batteryCard = null;
         previewImage = null;
         previewPlaceholder = null;
         tvPreviewInfo = null;
@@ -419,7 +431,7 @@ public class MainActivity extends AppCompatActivity {
         if (index == 0) {
             buildOcrSettingsPage(contentContainer);
         } else {
-            buildGesturePage(contentContainer);
+            buildGestureCard(contentContainer);
         }
         refreshStatus();
     }
@@ -511,86 +523,91 @@ public class MainActivity extends AppCompatActivity {
             tvStatusSub.setText(enabled ? LOCAL_URL : "接口未监听");
         }
         if (tvBatteryText != null) {
+            // 只在「没进白名单」时才露出来。
+            // 进了白名单就没什么好说的了，留着只是占地方；
+            // 而没进白名单时 Android 会随时冻结后台进程，表现为
+            // 「服务莫名停止」—— 这一条必须让用户看见。
             boolean ok = isIgnoringBatteryOptimizations();
-            tvBatteryText.setText(ok ? "已加入电池优化白名单" : "未加入白名单，后台可能被冻结");
-            tvBatteryText.setTextColor(ok ? C_TEXT : C_WARN);
-            if (batteryCard != null) {
-                batteryCard.setBackground(borderedBg(C_SURFACE, ok ? C_DIVIDER : 0x33F79009, 14));
-            }
+            tvBatteryText.setText("⚠ 未加入电池优化白名单，后台可能被冻结。点这里去设置。");
+            tvBatteryText.setTextColor(C_WARN);
+            tvBatteryText.setVisibility(ok ? View.GONE : View.VISIBLE);
         }
-    }
-
-    private View statusCard(String title, String subtitle) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setElevation(dp(1));
-
-        TextView dot = new TextView(this);
-        dot.setBackgroundResource(R.drawable.dot_ok);
-        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(9), dp(9));
-        dotLp.setMarginEnd(dp(12));
-        card.addView(dot, dotLp);
-
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        TextView t1 = new TextView(this);
-        t1.setText(title);
-        t1.setTextSize(14);
-        t1.setTypeface(null, Typeface.BOLD);
-        t1.setTextColor(C_TEXT);
-        col.addView(t1);
-
-        TextView t2 = new TextView(this);
-        t2.setText(subtitle);
-        t2.setTextSize(11.5f);
-        t2.setTextColor(C_TEXT_SUB);
-        col.addView(t2);
-
-        card.addView(col);
-        return card;
     }
 
     // ============================================================
     //  滑动触发页（入口）
     // ============================================================
     /**
-     * 「滑动触发」页：只做入口与状态展示，细节交给 {@link EdgeGestureActivity}。
+     * 「边缘滑动手势」入口卡 —— 「滑动触发」页的第一张。
      *
-     * 放在主界面而不是藏进二级菜单，是因为这个功能需要「随手开随手关」：
+     * 整页放在主界面而不是藏进二级菜单，是因为这个功能需要「随手开随手关」：
      * 手势引擎开着时会常驻一个悬浮窗，用户得能一眼看到它是否在运行。
+     *
+     * ════════════════════════════════════════════════════════════════
+     * 【为什么不再有两个按钮】
+     * ════════════════════════════════════════════════════════════════
+     * 原先卡片下面并排两个按钮：「打开手势设置」和「去启用」。
+     * 但「去启用」的逻辑是 —— 没开就开、开了就跳设置页，也就是说
+     * 它最终做的事和「打开手势设置」是同一件。两个按钮干一件事，
+     * 用户站在那儿得先想「我该点哪个」。
+     *
+     * 现在整张卡就是一个入口，右侧一个「›」，底下那行小字写清状态，
+     * 与下方的「滑动菜单」卡完全一致 —— 两处相邻的东西长得一样，
+     * 才不会让人以为一个是开关、一个是页面。
+     *
+     * 点一下照样能顺手打开总开关（见 {@link #onGestureCardTap()}）：
+     * 没开就开，开了就进设置页调参数。这和原「去启用」的判断一致，
+     * 只是不再单独占一个按钮。
      */
-    private void buildGesturePage(ViewGroup parent) {
-        // ---------- 状态卡 ----------
+    private void buildGestureCard(ViewGroup parent) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
         card.setElevation(dp(1));
 
-        TextView title = new TextView(this);
-        title.setText("边缘滑动手势");
-        title.setTextSize(15f);
-        title.setTypeface(null, Typeface.BOLD);
-        title.setTextColor(C_TEXT);
-        card.addView(title);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
 
-        tvGestureState = new TextView(this);
-        tvGestureState.setTextSize(12.5f);
-        tvGestureState.setTextColor(C_TEXT_SUB);
-        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        TextView t = new TextView(this);
+        t.setText("边缘滑动手势");
+        t.setTextSize(14.5f);
+        t.setTypeface(null, Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+
+        TextView sub = new TextView(this);
+        sub.setTextSize(11.5f);
+        sub.setTextColor(C_HINT);
+        sub.setLineSpacing(0f, 1.35f);
+        tvGestureState = sub;
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        stLp.topMargin = dp(6);
-        card.addView(tvGestureState, stLp);
+        sl.topMargin = dp(3);
+        col.addView(sub, sl);
 
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(20);
+        arrow.setTextColor(C_HINT);
+        arrow.setPadding(dp(8), 0, 0, 0);
+        row.addView(arrow);
+
+        row.setOnClickListener(v -> onGestureCardTap());
+        card.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 说明文字只在卡片下方留一行，不占按钮位。
         TextView desc = new TextView(this);
-        desc.setText("在屏幕边缘放一个可拖动的滑动手柄，手指从手柄上划过设定距离就"
-                + "立刻触发（滑过即响应，不必抬手）。支持上/下/左/右加四个斜向"
-                + "共 8 个方向，每个方向的触发距离都能单独调，也可以让整条边缘都可滑动。");
-        desc.setTextSize(12.5f);
+        desc.setText("屏幕边缘的手柄，滑一下即触发，支持 8 个方向。");
+        desc.setTextSize(12f);
         desc.setTextColor(C_HINT);
         desc.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
@@ -600,51 +617,32 @@ public class MainActivity extends AppCompatActivity {
 
         parent.addView(card, cardLp());
 
-        // ---------- 两个入口按钮 ----------
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        Button btnOpen = secondaryButton("打开手势设置", v -> EdgeGestureActivity.open(this));
-        Button btnActive = secondaryButton("去启用", v -> {
-            // 没开总开关就直接开，已经开了就跳进设置页（用户大概是想调参数）
-            if (!EdgeGesturePrefs.isEnabled(this)) {
-                EdgeGesturePrefs.setEnabled(this, true);
-                EdgeGestureService.sync(this);
-                toast("已启用边缘滑动触发");
-                refreshGestureState();
-            } else {
-                EdgeGestureActivity.open(this);
-            }
-        });
-        LinearLayout.LayoutParams bLp = new LinearLayout.LayoutParams(0, dp(44), 1f);
-        bLp.topMargin = dp(12);
-        bLp.rightMargin = dp(5);
-        row.addView(btnOpen, bLp);
-        LinearLayout.LayoutParams bLp2 = new LinearLayout.LayoutParams(0, dp(44), 1f);
-        bLp2.topMargin = dp(12);
-        bLp2.leftMargin = dp(5);
-        row.addView(btnActive, bLp2);
-        parent.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        // ---------- 滑动菜单 ----------
         // 菜单是「手势的产物」，跟手柄、触发距离是一回事，所以放在这一页；
         // 早先挂在「手势设置」二级页里，得点进去才找得到。
         buildMenuCard(parent);
 
-        // ---------- 和宏怎么配合 ----------
-        addSectionTitle(parent, "怎么让宏收到手势");
-        LinearLayout tip = new LinearLayout(this);
-        tip.setOrientation(LinearLayout.VERTICAL);
-        tip.setBackground(borderedBg(C_BRAND_SOFT, 0x00000000, 14));
-        tip.setPadding(dp(16), dp(14), dp(16), dp(14));
-        addTipLine(tip, "插件方式",
-                "MacroDroid → 触发器 → 「小孙OCR · 边缘滑动事件」，"
-                        + "选好方向即可；方向不符的宏不会被触发。"
-                        + "滑出菜单选中后，结果会以菜单变量的形式交给宏，\n"
-                        + "变量名叫什么由你在 MacroDroid 里自己定。");
-        parent.addView(tip, cardLp());
-
         refreshGestureState();
+    }
+
+    /**
+     * 点手势卡：没开就开，开了就进设置页。
+     *
+     * 这是原「去启用」按钮的判断逻辑，原样保留 —— 它其实是两种意图的
+     * 合并：用户点这张卡，要么是想开（那就开），要么是想调（那就进页面）。
+     * 既然「已经开着」时开这个动作没有意义，直接进设置页就是他要的下一个
+     * 动作，不用再问他一遍。
+     */
+    private void onGestureCardTap() {
+        if (!EdgeGesturePrefs.isEnabled(this)) {
+            EdgeGesturePrefs.setEnabled(this, true);
+            // 开关只是写进 Prefs，服务还不会自己动 ——
+            // 这里补一次 sync()，否则用户点完看到「已开启」却没有任何手柄。
+            EdgeGestureService.sync(this);
+            toast("已启用边缘滑动触发");
+            refreshGestureState();
+        } else {
+            EdgeGestureActivity.open(this);
+        }
     }
 
     /**
@@ -719,29 +717,6 @@ public class MainActivity extends AppCompatActivity {
         } else {
             tvMenuSub.setText("已启用 · " + n + " 项 · 滑出后不抬手就能选");
         }
-    }
-
-    /** 方块提示卡里的一行（标题 + 说明）。 */
-    private void addTipLine(ViewGroup parent, String head, String body) {
-        TextView h = new TextView(this);
-        h.setText(head);
-        h.setTextSize(12.5f);
-        h.setTypeface(null, Typeface.BOLD);
-        h.setTextColor(C_BRAND_DARK);
-        if (parent.getChildCount() > 0) {
-            h.setPadding(0, dp(10), 0, 0);
-        }
-        parent.addView(h);
-
-        TextView b = new TextView(this);
-        b.setText(body);
-        b.setTextSize(12f);
-        b.setTextColor(C_TEXT_SUB);
-        b.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(3);
-        parent.addView(b, lp);
     }
 
     /** 刷新「滑动触发」页的状态文案（没打开这一页时 tvGestureState 为 null，安全跳过）。 */
@@ -855,38 +830,68 @@ public class MainActivity extends AppCompatActivity {
      * 边缘滑动手势是另一个服务，不受影响 —— 这正是本开关要服务的人群：
      * 只想用手势触发宏、不想养着一个 OCR 服务的人。
      */
-    private View buildOcrSwitchCard() {
+    /**
+     * 合并后的「OCR 服务」卡片：状态点 + 标题 + 接口地址 + 总开关。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【为什么把状态卡和开关卡并成一张】
+     * ════════════════════════════════════════════════════════════
+     * 它们回答的是同一个问题 ——「服务开着吗、能用吗」。拆成两张卡时，
+     * 用户要先读「服务已就绪」再往下找开关，两个信息在视觉上还被一条
+     * 分割线隔开，反倒像是两件不相干的事。并成一张后：左边状态点告诉
+     * 你现在行不行，右边开关就是让它行/不行的那个东西。
+     *
+     * ════════════════════════════════════════════════════════════
+     * 【关掉之后影响什么】
+     * ════════════════════════════════════════════════════════════
+     * 只影响 HTTP 接口这条链路：接口不再监听、模型不再常驻、开机不再自启。
+     * 边缘滑动手势是另一个服务，不受影响 —— 这正是本开关要服务的人群：
+     * 只想用手势触发宏、不想养着一个 OCR 服务的人。
+     */
+    private View buildOcrServiceCard() {
         LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
         card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
         card.setElevation(dp(1));
 
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
+        // ---- 左侧：状态点 ----
+        TextView dot = new TextView(this);
+        dot.setBackgroundResource(R.drawable.dot_ok);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(9), dp(9));
+        dotLp.setMarginEnd(dp(12));
+        card.addView(dot, dotLp);
+        tvStatusDot = dot;
 
+        // ---- 中间：标题 + 接口地址 ----
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
+
         TextView t = new TextView(this);
-        t.setText("启用 OCR 服务");
+        t.setText("OCR 服务");
         t.setTextSize(14.5f);
         t.setTypeface(null, Typeface.BOLD);
         t.setTextColor(C_TEXT);
         col.addView(t);
+        tvStatusText = t;
+
         TextView sub = new TextView(this);
         sub.setTextSize(11.5f);
         sub.setTextColor(C_TEXT_SUB);
         sub.setLineSpacing(dp(3), 1f);
-        sub.setText("关闭后接口不再监听，也不开机自启；\n"
-                + "「边缘滑动手势」是另一个服务，不受影响。");
+        // 副标题＝接口地址；关掉开关后 refreshStatus() 会把它改成「接口未监听」
+        sub.setText(LOCAL_URL);
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         sl.topMargin = dp(4);
         col.addView(sub, sl);
-        row.addView(col, new LinearLayout.LayoutParams(0,
+        tvStatusSub = sub;
+
+        card.addView(col, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        // ---- 右侧：总开关 ----
         android.widget.Switch sw = new android.widget.Switch(this);
         sw.setChecked(OCRService.isEnabled(this));
         sw.setOnCheckedChangeListener((b, checked) -> {
@@ -909,74 +914,49 @@ public class MainActivity extends AppCompatActivity {
             new android.os.Handler(getMainLooper()).postDelayed(this::refreshStatus, 600);
             toast(checked ? "已启用 OCR 服务" : "已关闭 OCR 服务");
         });
-        row.addView(sw);
-        card.addView(row);
+        card.addView(sw);
+
         return card;
     }
+
+    // ============================================================
+    //  顶栏「⋮」里的两项设置
+    // ============================================================
 
     /**
-     * 「从最近任务隐藏」开关。
+     * 菜单项标题带当前状态，例如「从最近任务隐藏：已开」。
      *
-     * ════════════════════════════════════════════════════════════
-     * 【这个开关在干什么】
-     * ════════════════════════════════════════════════════════════
-     * 打开后，多任务（最近任务）界面里看不到本应用这张卡片。
-     * 适合「平时只用手势触发、不想让它占着多任务」的用法。
-     *
-     * ════════════════════════════════════════════════════════════
-     * 【不影响什么】
-     * ════════════════════════════════════════════════════════════
-     *  · 前台服务照常运行，通知照常在；
-     *  · 边缘滑动手势照常可用；
-     *  · 只是多任务里那张卡片没了，想进来从桌面图标点。
+     * 为什么不带勾选框：AlertDialog 的 setItems 不支持多选样式，
+     * 而这里每项都是「点一下切换」的即时动作 —— 把状态写进标题，
+     * 用户打开菜单就知道现在是什么状态，不必再去别处确认。
      */
-    private View buildHideRecentsCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(12), dp(16), dp(12));
-        card.setElevation(dp(1));
-
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        TextView t = new TextView(this);
-        t.setText("从最近任务隐藏");
-        t.setTextSize(14f);
-        t.setTypeface(null, Typeface.BOLD);
-        t.setTextColor(C_TEXT);
-        col.addView(t);
-        TextView sub = new TextView(this);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(C_HINT);
-        sub.setLineSpacing(0f, 1.35f);
-        sub.setText("开启后多任务界面里不显示本应用。\n"
-                + "服务与手势不受影响，从桌面图标照常进入。");
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(4);
-        col.addView(sub, sl);
-        card.addView(col, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        android.widget.Switch sw = new android.widget.Switch(this);
-        suppressRecentsToggle = true;
-        sw.setChecked(OCRService.isHiddenFromRecents(this));
-        suppressRecentsToggle = false;
-        sw.setOnCheckedChangeListener((b, checked) -> {
-            if (suppressRecentsToggle) return;   // 初始化时别误触发
-            OCRService.setHiddenFromRecents(this, checked);
-            // 就地生效，界面不重载：切到多任务立刻就能看到结果。
-            OCRService.applyRecents(this);
-            toast(checked ? "已从最近任务隐藏" : "已恢复显示在最近任务");
-        });
-        card.addView(sw);
-        return card;
+    private String recentsMenuTitle() {
+        return "从最近任务隐藏：" + (OCRService.isHiddenFromRecents(this) ? "已开" : "关");
     }
 
+    private String keepAliveMenuTitle() {
+        return "后台保活：" + (isIgnoringBatteryOptimizations() ? "已在白名单" : "未加入");
+    }
 
+    /** 点一下就在开、关之间切换，不用弹二次确认。 */
+    private void toggleHideFromRecents() {
+        boolean next = !OCRService.isHiddenFromRecents(this);
+        OCRService.setHiddenFromRecents(this, next);
+        // 就地生效，界面不重载：切到多任务立刻就能看到结果。
+        OCRService.applyRecents(this);
+        toast(next ? "已从最近任务隐藏" : "已恢复显示在最近任务");
+        refreshStatus();
+    }
 
-
+    /** 已在白名单就不重复申请（系统那边会弹一个「无需更改」的框，很困惑）。 */
+    private void openBatteryWhitelist() {
+        if (isIgnoringBatteryOptimizations()) {
+            toast("已在电池优化白名单里");
+            return;
+        }
+        requestIgnoreBatteryOptimizations();
+        // 从系统页返回后 onResume 会再刷一次，这里先不管
+    }
 
     // ============================================================
     //  OCR设置页
@@ -991,63 +971,28 @@ public class MainActivity extends AppCompatActivity {
      */
 
     private void buildOcrSettingsPage(ViewGroup parent) {
-        // 服务状态
-        LinearLayout card = (LinearLayout) statusCard("服务已就绪", LOCAL_URL);
-        parent.addView(card, cardLp());
-        tvStatusDot = (TextView) card.getChildAt(0);
-        tvStatusText = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(0);
-        // 副标题＝接口地址；关掉开关后 refreshStatus() 会把它显示成「接口未监听」
-        tvStatusSub = (TextView) ((LinearLayout) card.getChildAt(1)).getChildAt(1);
-        // 总开关：自「接口文档」页并入
-        addCard(parent, buildOcrSwitchCard());
+        // ---------- 服务状态 + 总开关（合并成一张） ----------
+        parent.addView(buildOcrServiceCard(), cardLp());
 
-        // 电池优化
-        LinearLayout bat = new LinearLayout(this);
-        bat.setOrientation(LinearLayout.HORIZONTAL);
-        bat.setGravity(Gravity.CENTER_VERTICAL);
-        bat.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        bat.setPadding(dp(16), dp(14), dp(16), dp(14));
-        bat.setElevation(dp(1));
-        bat.setOnClickListener(v -> requestIgnoreBatteryOptimizations());
-
-        TextView batIcon = new TextView(this);
-        batIcon.setText("⚡");
-        batIcon.setTextSize(16);
-        LinearLayout.LayoutParams biLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        biLp.setMarginEnd(dp(12));
-        bat.addView(batIcon, biLp);
-
-        LinearLayout batCol = new LinearLayout(this);
-        batCol.setOrientation(LinearLayout.VERTICAL);
-        TextView bt1 = new TextView(this);
-        bt1.setText("后台保活");
-        bt1.setTextSize(14);
-        bt1.setTypeface(null, Typeface.BOLD);
-        bt1.setTextColor(C_TEXT);
-        batCol.addView(bt1);
-        TextView bt2 = new TextView(this);
-        bt2.setText("点击设置电池优化白名单");
-        bt2.setTextSize(11.5f);
-        batCol.addView(bt2);
-        tvBatteryText = bt2;
-        bat.addView(batCol);
-        batteryCard = bat;
-        parent.addView(bat, cardLp());
-
-        LinearLayout keepRow = new LinearLayout(this);
-        keepRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams krLp = new LinearLayout.LayoutParams(
+        // 「后台保活」与「从最近任务隐藏」原先各是一张卡，现在都收进
+        // 顶栏「⋮」菜单了 —— 这两项都是配一次就不再动的设置，放在页面里
+        // 反而把「截屏识别」「识别结果」这些常用内容挤到了下面。
+        //
+        // 但保活状态必须还能一眼看到：没进白名单的机器上 Android 会随时
+        // 冻结后台进程，表现是「服务莫名停止」。这里只留一行提示，
+        // 不进白名单时才显示，点一下就能去设置。
+        tvBatteryText = new TextView(this);
+        tvBatteryText.setTextSize(11.5f);
+        tvBatteryText.setTextColor(C_WARN);
+        tvBatteryText.setLineSpacing(0f, 1.35f);
+        tvBatteryText.setPadding(dp(4), dp(2), dp(4), dp(2));
+        tvBatteryText.setOnClickListener(v -> openBatteryWhitelist());
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        krLp.topMargin = dp(10);
-        keepRow.setLayoutParams(krLp);
-        keepRow.addView(secondaryButton("电池优化白名单",
-                v -> requestIgnoreBatteryOptimizations()), weightLp());
-        keepRow.addView(secondaryButton("应用设置", v -> openAppSettings()), weightLp());
-        parent.addView(keepRow);
-
-        // ---------- 从最近任务隐藏 ----------
-        addCard(parent, buildHideRecentsCard());
+        // 负的 topMargin：卡片下方已经有 cardLp() 的 12dp 间距，这里贴回去一点，
+        // 让它看起来像紧跟着服务卡的附带说明，而不是另起一段。
+        blp.topMargin = -dp(4);
+        parent.addView(tvBatteryText, blp);
 
         // ---------- 截屏识别 ----------
         addSectionTitle(parent, "屏幕截屏识别");
@@ -1098,13 +1043,10 @@ public class MainActivity extends AppCompatActivity {
         capCard.addView(capRow2);
 
         TextView capNote = new TextView(this);
-        capNote.setText("① 无障碍截图（推荐）：点开后勾选「" + A11Y_LABEL + "」，"
-                + "之后随时可截、不弹框、不需要 root。\n"
-                + "② root 截屏：设备有 root 时自动启用（screencap），同样免授权。\n"
-                + "③ 截屏授权：无 root 时的兜底，每次重启都要手点一次录屏授权。\n\n"
-                + "三者按上面的顺序自动挑选，任一可用即可，不必都开。\n"
-                + "「悬浮窗权限」建议一并开启：MacroDroid 在后台触发插件时，"
-                + "App 需要它才能自动弹出截屏授权框（否则只能先手动打开 App 授权）。");
+        capNote.setText("① 无障碍（推荐）：勾选「" + A11Y_LABEL + "」，免 root、不弹框。\n"
+                + "② root 截屏：有 root 时自动启用。\n"
+                + "③ 截屏授权：无 root 时的兜底，每次重启需手点一次。\n"
+                + "任一可用即可，不必都开。");
         capNote.setTextSize(11);
         capNote.setTextColor(C_HINT);
         capNote.setLineSpacing(0f, 1.3f);
@@ -1113,57 +1055,6 @@ public class MainActivity extends AppCompatActivity {
 
         parent.addView(capCard, cardLp());
         updateCaptureInfo();
-
-        // ---------- 摄像头实时识别 ----------
-        // 放在「截屏识别」之后、「图片预览」之前：
-        // 它是另一条「输入源」，和「从文件选图」是同类，挨着放最符合阅读顺序。
-        addSectionTitle(parent, "摄像头实时识别");
-
-        LinearLayout camCard = new LinearLayout(this);
-        camCard.setOrientation(LinearLayout.VERTICAL);
-        camCard.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        camCard.setElevation(dp(1));
-        camCard.setPadding(dp(16), dp(14), dp(16), dp(14));
-
-        TextView camTitle = new TextView(this);
-        camTitle.setText("对准数字，自动识别");
-        camTitle.setTextSize(14.5f);
-        camTitle.setTypeface(null, Typeface.BOLD);
-        camTitle.setTextColor(C_TEXT);
-        camCard.addView(camTitle);
-
-        TextView camDesc = new TextView(this);
-        camDesc.setText("调起后置摄像头，连续识别画面里的数字（小票、电表、车牌都行）；"
-                + "也可以点页内「相册」选一张已有图片识别，识别后会把原图显示出来、"
-                + "并在含数字的行上描绿框、框里写着这一行抽到的数字。\n"
-                + "识别在本机完成，不联网、不上传。结果只保留数字，点一下就能复制。");
-        camDesc.setTextSize(12f);
-        camDesc.setTextColor(C_TEXT_SUB);
-        camDesc.setLineSpacing(0f, 1.35f);
-        camDesc.setPadding(0, dp(6), 0, 0);
-        camCard.addView(camDesc);
-
-        TextView camWarn = new TextView(this);
-        camWarn.setText("⚠ 实时识别比较耗电，长时间使用机身会发热；用完记得退出这一页。");
-        camWarn.setTextSize(11f);
-        camWarn.setTextColor(C_HINT);
-        camWarn.setLineSpacing(0f, 1.3f);
-        camWarn.setPadding(0, dp(8), 0, 0);
-        camCard.addView(camWarn);
-
-        Button btnCamera = primaryButton("打开摄像头识别");
-        LinearLayout.LayoutParams camBtnLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
-        camBtnLp.topMargin = dp(12);
-        camCard.addView(btnCamera, camBtnLp);
-        btnCamera.setOnClickListener(v -> {
-            try {
-                startActivity(new Intent(this, CameraOcrActivity.class));
-            } catch (Throwable t) {
-                toast("打不开摄像头页面：" + t.getClass().getSimpleName());
-            }
-        });
-        parent.addView(camCard, cardLp());
 
         // ---------- 图片预览框 ----------
         addSectionTitle(parent, "图片预览");
@@ -1308,11 +1199,7 @@ public class MainActivity extends AppCompatActivity {
         resLp.topMargin = dp(4);
         parent.addView(tvResult, resLp);
 
-        // ---------- 日志 ----------
-        // 放在识别结果之后：出问题时用户才往下找，平时不碍事。
-        addSectionTitle(parent, "日志与排障");
-        addCard(parent, LogCard.build(this));
-
+        // 日志已收进顶栏「⋮」菜单（LogCard.buildMenuButton），不再占页面底部。
         // ---------- 事件 ----------
         btnOcr.setOnClickListener(v -> startOcr());
 
@@ -1540,6 +1427,7 @@ public class MainActivity extends AppCompatActivity {
             }
             drawBoxes(src, result);
         } catch (Exception ignored) {
+            // 画框是纯展示，解码或绘制异常不应该让已经拿到的识别结果丢失。
         }
     }
 
@@ -1604,21 +1492,16 @@ public class MainActivity extends AppCompatActivity {
         String detail;
         switch (OCRService.currentTier) {
             case OCRService.TIER_RAPID:
-                // 说明已随实现更新：rapid 不再是 native RapidOCR，而是 ML Kit。
-                detail = "ML Kit 文字识别（捆绑版，英文 + 中文）：模型随 APK 打包，"
-                        + "无需 Google Play 服务、不联网下载；中英混排与倾斜文字表现好，"
-                        + "输出行级包围盒与置信度。";
+                detail = "ML Kit（捆绑版，中英），无需 Google Play 服务。";
                 break;
             case OCRService.TIER_SMALL:
-                detail = "高精度档：字典 18708 字符，保留更多标点与符号。";
+                detail = "高精度档：字典 18708 字符。";
                 break;
             default:
-                detail = "轻量档：字典 6904 字符，速度最快、占用最小。";
+                detail = "轻量档：字典 6904 字符，速度最快。";
                 break;
         }
-        tierInfo.setText("当前：" + cur + "\n" + detail
-                + "\n外部调用可传 tier 字段切换（tiny / small / rapid），"
-                + "切换后所有请求都用新档位。");
+        tierInfo.setText("当前：" + cur + "\n" + detail);
     }
 
     /** 把截屏授权结果交给服务，建立投屏会话。 */
@@ -1864,6 +1747,7 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             } catch (Exception ignored) {
+                // 返回体不是预期的 JSON 时直接落到下方的「原样显示」，不能因此不显示内容。
             }
         }
 
@@ -1974,6 +1858,7 @@ public class MainActivity extends AppCompatActivity {
                 old.recycle();
             }
         } catch (Exception ignored) {
+            // 此处已在 showBitmap 之后，回收失败只会漏一张旧位图，绝不能让它把新图带崩。
         }
     }
 
@@ -2060,17 +1945,6 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e2) {
                 toast("请手动到 设置-电池 关闭本应用限制");
             }
-        }
-    }
-
-    private void openAppSettings() {
-        try {
-            Intent intent = new Intent(
-                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-            intent.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
-        } catch (Exception e) {
-            toast("无法打开应用设置");
         }
     }
 
@@ -2187,6 +2061,7 @@ public class MainActivity extends AppCompatActivity {
                     intent.setData(Uri.parse("package:" + getPackageName()));
                     startActivity(intent);
                 } catch (Exception ignored) {
+                    // 个别 ROM 没有这个设置页，startActivity 会抛 ActivityNotFound；失败就停在当前页。
                 }
             }
         } else {

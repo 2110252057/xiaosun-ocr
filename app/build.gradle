@@ -11,12 +11,13 @@ android {
         applicationId 'com.xiaosun.ocr'
         minSdk 24
         targetSdk 34
-        // 版本号统一为 1.1。
+        // 版本号统一为 1.2。
         // 版本号唯一来源就是这里：MainActivity 通过 BuildConfig.VERSION_NAME 读取，
         // 不再硬编码字符串，避免出现多处版本号不一致。
         // versionCode 每次发版必须递增，否则无法覆盖安装旧版本。
-        versionCode 2
-        versionName '1.1'
+        // 2 → 3：1.2 加入「按方向区分菜单/直触」与触发器页的「滑过之后」选项。
+        versionCode 3
+        versionName '1.2'
 
         // 仅保留 arm64-v8a 与 armeabi-v7a（已移除 x86_64）
         // 说明：native 库是预编译产物，放在 jniLibs/ 下直接打包，
@@ -73,7 +74,10 @@ dependencies {
     implementation libs.androidx.core
     implementation libs.androidx.appcompat
     implementation libs.material
-    implementation libs.androidx.constraintlayout
+    // 【已移除 androidx.constraintlayout】
+    // 本工程没有任何 XML 布局（res/layout 是空目录），因此也不可能有
+    // ConstraintLayout —— 全工程 grep 'ConstraintLayout' 结果为 0。
+    // 留着它只会让构建多解析一个用不上的 aar，也容易误导后来者。
 
     // 纯 Java 嵌入式 HTTP 服务器，用于复刻原版 127.0.0.1:1666 的接口协议
     implementation 'org.nanohttpd:nanohttpd:2.3.1'

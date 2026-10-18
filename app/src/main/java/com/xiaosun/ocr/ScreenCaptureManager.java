@@ -233,6 +233,7 @@ public class ScreenCaptureManager {
                 virtualDisplay = null;
             }
         } catch (Exception ignored) {
+            // stop() 里逐个释放：某一项失败不能让后面的也泄漏。
         }
         try {
             if (imageReader != null) {
@@ -240,6 +241,7 @@ public class ScreenCaptureManager {
                 imageReader = null;
             }
         } catch (Exception ignored) {
+            // 同上：关闭 ImageReader。
         }
         try {
             if (handlerThread != null) {
@@ -247,6 +249,7 @@ public class ScreenCaptureManager {
                 handlerThread = null;
             }
         } catch (Exception ignored) {
+            // 同上：退出 HandlerThread。
         }
         handler = null;
         projection = null;
@@ -260,12 +263,14 @@ public class ScreenCaptureManager {
                 projection.unregisterCallback(projectionCallback);
             }
         } catch (Exception ignored) {
+            // 同上：注销投屏回调。
         }
         try {
             if (projection != null) {
                 projection.stop();
             }
         } catch (Exception ignored) {
+            // 同上：停止投屏（用户已在系统弹窗里取消时再 stop 会抛）。
         }
         releaseResources();
     }

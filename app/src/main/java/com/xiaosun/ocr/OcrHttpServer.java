@@ -464,6 +464,7 @@ public class OcrHttpServer extends NanoHTTPD {
                 }
             }
         } catch (Throwable ignored) {
+            // 返回体不是合法 JSON 就当作成功：调用方以 HTTP 层面通不通作为探测依据。
         }
         return Response.Status.OK;
     }
@@ -503,6 +504,7 @@ public class OcrHttpServer extends NanoHTTPD {
                 try {
                     type = Integer.parseInt(typeStr.trim());
                 } catch (NumberFormatException ignored) {
+                    // type 参数不是数字时保持默认值（1 = 纯文本），不因一个脏参数直接报错。
                 }
             }
 
@@ -579,6 +581,7 @@ public class OcrHttpServer extends NanoHTTPD {
                 return true;
             }
         } catch (Throwable ignored) {
+            // 查询串解析失败视为「没有 format=text」，按 JSON 返回：这是更保守的默认。
         }
         return false;
     }

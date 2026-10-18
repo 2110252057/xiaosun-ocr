@@ -88,6 +88,16 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
 
     private TextView nameView;
     private LinearLayout colorRow;
+    /** 「可触发方向」上方那段汇总：「哪些方向会弹菜单」。单行切换时也要刷它。 */
+    private TextView menuSummary;
+    /**
+     * 八颗「菜单 / 直触」胶囊。
+     *
+     * 批量操作（全部设为菜单 / 直触）之后要回头把这八颗都刷一遍外观。
+     * 每颗胶囊的 {@code getId()} 里存的就是它对应的方向下标 ——
+     * 这些控件只在内存里活着、不参与状态保存，撞 id 无所谓。
+     */
+    private final java.util.List<TextView> menuPills = new java.util.ArrayList<>();
 
     /** 实时预览：画在编辑页里，改一下数字就能看到实际比例（见本文件末尾的 PreviewStrip。） */
     private PreviewStrip preview;
@@ -529,9 +539,8 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
 
     private void buildSystemGestureSection(LinearLayout parent) {
         parent.addView(label("系统手势"), topMargin(22));
-        parent.addView(note("手势导航下，系统是从屏幕边缘往内判定「返回」的，"
-                + "优先级比应用窗口还高 —— 手柄贴着边缘时，手指刚碰上去就被系统"
-                + "当成返回吃掉了，表现为「条子在那儿但按不动」。"), topMargin(2));
+        parent.addView(note("手势导航下，系统会从屏幕边缘往内判「返回」，优先级高于应用窗口，"
+                + "手柄贴边时容易被抢走触摸。"), topMargin(2));
 
         // ---- 平台能力提示：低于 Android 10 的机器根本没有这个 API ----
         //
@@ -546,12 +555,8 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             warn.setTextSize(11.5f);
             warn.setTextColor(0xFFB45309);   // 琥珀色，与「警告」语义一致
             warn.setLineSpacing(0f, 1.35f);
-            warn.setText("⚠ 当前系统 Android " + Build.VERSION.RELEASE
-                    + "（API " + Build.VERSION.SDK_INT + "），低于 Android 10。\n"
-                    + "该版本没有提供「屏蔽系统手势」的平台接口，本开关在本机不会生效 —— "
-                    + "这是系统限制，不是配置错误。\n"
-                    + "临时办法：把手柄挪到屏幕偏中间的位置（避开系统边缘返回区），"
-                    + "或改用「三键导航」。");
+            warn.setText("⚠ Android 10 以下没有「屏蔽系统手势」的平台接口，"
+                    + "本开关不会生效。可把手柄挪离屏幕边缘，或改用三键导航。");
             LinearLayout.LayoutParams wl = wide();
             wl.topMargin = dp(6);
             parent.addView(warn, wl);
@@ -587,17 +592,64 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
                 ? "只排除手柄那一段，屏幕其余部分的系统手势照常。"
                 : "⚠ 当前系统低于 Android 10，本机不支持，这一项不会生效。";
 
-        parent.addView(note("开启后，手柄占的那块矩形会报给系统，"
-                + "那一带就不再判系统手势，触摸完整交给手柄。\n"
+        parent.addView(note("开启后，手柄占的那块矩形会报给系统，那一带不再判系统手势。\n"
                 + extra + "\n"
-                + "系统对每条边可排除的高度有 200dp 上限，"
-                + "手柄高于 200dp 时超出部分仍会被系统手势抢走。"), topMargin(4));
+                + "每条边最多排除 200dp，手柄更高时超出部分仍会被系统抢走。"), topMargin(4));
     }
 
     private void buildDirectionSection(LinearLayout parent) {
         parent.addView(label("可触发方向"), topMargin(22));
-        parent.addView(note("每个方向可单独开关；点右侧的距离数字可单独设置该方向的触发距离（0 = 跟随上面的滑动距离）。"),
+        parent.addView(note("每个方向可单独开关；点右侧的距离数字可单独设置该方向的触发距离（0 = 跟随上面的滑动距离）。"
+                        + "右端的「菜单 / 直触」决定滑过这个方向之后要不要弹菜单："
+                        + "选「菜单」= 弹出来、点中图标才发事件；选「直触」= 不弹菜单、抬手立刻发事件给宏。"),
                 topMargin(2));
+
+        // ── 当前状态汇总 ────────────────────────────────────────
+        //
+        // 「滑了不该弹的方向却弹了」是这里最常踩的坑，成因是：
+        // 菜单只看「该方向开启了 + 该方向是菜单模式 + 菜单总开关开着」，
+        // **完全不看**该方向有没有配触发器 —— 因为菜单是在向宿主
+        // 发 REQUEST_QUERY 之前就弹出来的，那一刻服务还不知道
+        // 这次滑动属于哪个宏。所以「哪个方向会弹」这件事必须一眼可见。
+        TextView summary = new TextView(this);
+        summary.setTextSize(11.5f);
+        summary.setLineSpacing(0f, 1.4f);
+        summary.setPadding(dp(12), dp(9), dp(12), dp(9));
+        summary.setBackground(roundBg(0x0F4F6BED));
+        menuSummary = summary;
+        refreshMenuSummary(summary);
+        parent.addView(summary, topMargin(8));
+
+        // 两键止血：只开菜单、只开直触。
+        LinearLayout bulk = new LinearLayout(this);
+        bulk.setOrientation(LinearLayout.HORIZONTAL);
+        TextView onlyMenu = new TextView(this);
+        onlyMenu.setText("全部设为菜单");
+        styleBulk(onlyMenu, C_BRAND, 0x0F4F6BED);
+        onlyMenu.setOnClickListener(v -> {
+            for (int i = 0; i < 8; i++) handle.menuByDir[i] = true;
+            persist(true);
+            refreshMenuSummary(summary);
+            refreshAllPills();
+        });
+        TextView onlyDirect = new TextView(this);
+        onlyDirect.setText("全部设为直触");
+        styleBulk(onlyDirect, 0xFFE6772E, 0x1FE6772E);
+        onlyDirect.setOnClickListener(v -> {
+            for (int i = 0; i < 8; i++) handle.menuByDir[i] = false;
+            persist(true);
+            refreshMenuSummary(summary);
+            refreshAllPills();
+        });
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp1.rightMargin = dp(5);
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lp2.leftMargin = dp(5);
+        bulk.addView(onlyMenu, lp1);
+        bulk.addView(onlyDirect, lp2);
+        parent.addView(bulk, topMargin(8));
 
         for (int d = 0; d < 8; d++) {
             final int dir = d;
@@ -645,10 +697,112 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             dist.setOnClickListener(v -> promptDistance(dir, dist));
             row.addView(dist);
 
+            // ── 菜单 / 直触 ──────────────────────────────────────
+            // 一个方向只需二选一，做成"点一下切换"的小胶囊，比再加一个
+            // CheckBox 省地方（这一行已经有勾选框、箭头、名字、距离了）。
+            final TextView mode = new TextView(this);
+            mode.setTextSize(12.5f);
+            mode.setPadding(dp(9), dp(4), dp(9), dp(4));
+            applyPill(mode, dir);
+            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            mlp.leftMargin = dp(8);
+            mode.setOnClickListener(v -> {
+                handle.menuByDir[dir] = !handle.menuByDir[dir];
+                applyPill(mode, dir);
+                persist(true);
+                // 单行切换也要更新汇总，否则上面那段文字会和下面自相矛盾。
+                refreshMenuSummary(menuSummary);
+            });
+            menuPills.add(mode);
+            row.addView(mode, mlp);
             parent.addView(row, wide());
         }
     }
 
+    /**
+     * 把「当前哪些方向会弹菜单」写成一段一眼能读完的话。
+     *
+     * 这段话存在的唯一理由：「我明明没配向上的触发器，怎么向上也弹菜单」——
+     * 弹菜单的三个条件里**没有一个**跟触发器有关，所以必须把结论摆在
+     * 用户面前，否则他只能靠一次次试错去推。
+     */
+    private void refreshMenuSummary(TextView tv) {
+        if (tv == null) return;
+        StringBuilder menu = new StringBuilder();
+        StringBuilder direct = new StringBuilder();
+        int menuCount = 0;
+        for (int d = 0; d < 8; d++) {
+            if (!handle.enabled[d]) continue;
+            if (handle.menuOf(d)) {
+                menu.append(EdgeGesturePrefs.DIR_ARROWS[d]);
+                menuCount++;
+            } else {
+                direct.append(EdgeGesturePrefs.DIR_ARROWS[d]);
+            }
+        }
+        boolean menuOn = EdgeGesturePrefs.isMenuEnabled(this);
+        StringBuilder sb = new StringBuilder();
+        if (!menuOn) {
+            sb.append("滑动菜单总开关现在是【关】，任何方向滑过都只发事件、不弹菜单。");
+        } else if (menuCount == 0) {
+            sb.append("菜单总开关是【开】，但没有任何启用的方向走菜单 —— 不会弹。");
+        } else {
+            sb.append("菜单总开关【开】。下面这些方向滑过会弹菜单：")
+                    .append(menu)
+                    .append("\n弹菜单跟「有没有配触发器」无关：没配触发器的方向，"
+                            + "滑过去照样弹，只是选了图标没人接。");
+        }
+        if (direct.length() > 0) {
+            sb.append("\n直接触发（不弹菜单）：").append(direct);
+        }
+        tv.setText(sb.toString());
+    }
+
+    /** 刷新一颗「菜单 / 直触」胶囊的外观。dir 见 {@code menuPills} 的用法说明。 */
+    private void applyPill(TextView mode, int dir) {
+        if (mode == null || dir < 0 || dir > 7) return;
+        boolean m = handle.menuOf(dir);
+        mode.setText(m ? "菜单" : "直触");
+        mode.setTextColor(m ? C_BRAND : 0xFFE6772E);
+        mode.setBackground(roundBg(m ? 0x0F4F6BED : 0x1FE6772E));
+    }
+
+    /**
+     * 把八颗胶囊全部刷一遍。
+     *
+     * 靠列表下标反推方向：方向行是 0..7 顺序 addView 的，所以
+     * {@code menuPills.get(i)} 一定对应方向 i。这样不必往 View 的 id
+     * 里塞业务数据（{@code setId(0)} 还会撞上 {@code View.NO_ID}）。
+     */
+    private void refreshAllPills() {
+        for (int i = 0; i < menuPills.size(); i++) {
+            applyPill(menuPills.get(i), i);
+        }
+    }
+
+    /** 「全部设为…」两个按钮的统一外观。 */
+    private void styleBulk(TextView tv, int color, int bg) {
+        tv.setTextSize(12.5f);
+        tv.setTextColor(color);
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(dp(9), dp(8), dp(9), dp(8));
+        tv.setBackground(roundBg(bg));
+    }
+
+    /**
+     * 圆角背景色块。
+     *
+     * 方向行里「菜单 / 直触」小胶囊用它上色：蓝色底 = 走菜单，
+     * 橙色底 = 直接触发。颜色直接给透明度 + RGB 的 ARGB 值，
+     * 和本页其他地方（距离数字的背景 0x0F4F6BED）保持同一套写法。
+     */
+    private GradientDrawable roundBg(int argb) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(argb);
+        d.setCornerRadius(dp(8));
+        return d;
+    }
     private void updateDistText(TextView tv, int dir) {
         int d = handle.distance[dir];
         tv.setText(d > 0 ? (d + "dp") : "默认");
@@ -674,6 +828,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
                     try {
                         v = s.isEmpty() ? 0 : Integer.parseInt(s);
                     } catch (Throwable ignored) {
+                        // 输入框不是数字时保持默认 0，下面 Math.max/min 会把值夹到合法区间。
                     }
                     handle.distance[dir] = Math.max(0, Math.min(600, v));
                     updateDistText(tv, dir);
@@ -734,6 +889,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             if (!replaced) all.add(handle);
             EdgeGesturePrefs.saveHandles(this, all);
         } catch (Throwable ignored) {
+            // 本条手柄解析失败就跳过，不能因为它让其他手柄也存不下去。
         }
 
         if (preview) {
@@ -983,8 +1139,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             t.setTextSize(11);
             t.setTextColor(C_HINT);
             t.setLineSpacing(0f, 1.35f);
-            t.setText("白色是屏幕，彩色条就是你屏幕上会看到的那个手柄。\n"
-                    + "按真实比例画的：条子多宽，手指能摸到的范围就有多宽。");
+            t.setText("白色是屏幕，彩色条即手柄，按真实比例绘制。");
             addView(t);
         }
     }

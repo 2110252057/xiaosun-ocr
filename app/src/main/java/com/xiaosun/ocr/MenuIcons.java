@@ -76,6 +76,7 @@ final class MenuIcons {
                 try {
                     return c.getPackageManager().getApplicationIcon(s);
                 } catch (PackageManager.NameNotFoundException ignored) {
+                    // 包已卸载或该包不在 <queries> 可见性范围内，走下面的 return null 由调用方画占位方块。
                 }
             }
         } catch (Throwable t) {

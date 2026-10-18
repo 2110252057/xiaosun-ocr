@@ -212,6 +212,7 @@ public final class AppLog {
                 default:  Log.i(tag, s); break;
             }
         } catch (Throwable ignored) {
+            // 日志本身的写入失败不能再抛出去，否则一次日志调用就能拖坠业务；本类的契约是永不抛异常。
         }
     }
 
@@ -233,14 +234,18 @@ public final class AppLog {
     private static void exec(Runnable r) {
         ExecutorService e = io;
         if (e == null) {
-            try { r.run(); } catch (Throwable ignored) {}
+            try { r.run(); } catch (Throwable ignored) {
+                // 线程池已关（进程退出中），只能退化成同步执行；这里吞掉的是同步那一路的异常。
+            }
             return;
         }
         try {
             e.execute(r);
         } catch (Throwable t) {
             // 池已关（进程退出中）就直接跑
-            try { r.run(); } catch (Throwable ignored) {}
+            try { r.run(); } catch (Throwable ignored) {
+                // 线程池尚未建立时直接同步执行；同步执行再抛也无处可去，吞掉。
+            }
         }
     }
 
@@ -268,6 +273,7 @@ public final class AppLog {
                 f.renameTo(old);
             }
         } catch (Throwable ignored) {
+            // 轮转是尽量做的事：磁盘满、文件被占用时放弃本次轮转，下面的写入仍照常进行。
         }
     }
 
@@ -295,6 +301,7 @@ public final class AppLog {
                 if (old.exists()) old.delete();
             }
         } catch (Throwable ignored) {
+            // 删旧日志只是清理，文件被占用或被并发创建时删不掉并不影响当前写入。
         }
     }
 
@@ -464,6 +471,7 @@ public final class AppLog {
         try {
             os.close();
         } catch (Throwable ignored) {
+            // 关流时再抛异常没有意义，数据已经写完了；本方法在 finally 里被调用。
         }
     }
 }

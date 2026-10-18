@@ -1,17 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  无障碍截图服务的配置。
+  无障碍服务的配置。
 
-  【为什么只要这一项能力】
-  本服务的唯一用途是调用 AccessibilityService.takeScreenshot()（API 30+）。
-  它**不订阅任何事件**（未声明 accessibilityEventTypes）、不请求手势能力，
-  因此系统不会把屏幕内容、点击、输入事件交给它。
-  用户勾选它，等于只说了一句「允许你在需要时截一张屏」。
+  【两项能力，各有一条事件订阅】
 
-  canTakeScreenshot 对应 CAPABILITY_CAN_TAKE_SCREENSHOT，
-  是 takeScreenshot() 能被调用的前提（应用侧还会再校验一次，双保险）。
+  1) 截图 —— canTakeScreenshot="true"
+     对应 AccessibilityService.takeScreenshot()（API 30+）。
+     这是本服务原本存在的唯一理由。
+
+  2) 前台应用侦测 —— accessibilityEventTypes="typeWindowStateChanged"
+     手柄的「黑名单」（在指定应用里不显示手柄）需要知道用户此刻在哪个
+     应用里。悬浮窗自己拿不到这件事，最可靠的办法就是订阅窗口状态变化：
+     事件里直接带 packageName，切换应用那一刻同步到达，没有延迟。
+
+  ★ 为什么只订这一种事件
+     · typeWindowStateChanged 只在「窗口换了」时来一次，频率极低；
+     · 代码里只取 event.getPackageName()，不读 getText()、
+       不读 getContentDescription()、不遍历控件树 ——
+       除了「哪个包在前台」，拿不到任何用户内容；
+     · 不订 typeWindowContentChanged（会疯狂刷屏）、不订触摸/按键事件
+       （那是用户输入，与黑名单无关）。
+
+  ★ 不想让本服务读包名的用户
+    把下面这一行 accessibilityEventTypes 删掉再安装即可：
+    代价是「手柄黑名单」失效（判断不出前台是谁，手柄在所有应用里照常显示），
+    截图等其它功能完全不受影响。
+
+  notificationTimeout 保持 100：窗口事件本身就不频繁，这个值只是节流上限。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault"
     android:canTakeScreenshot="true"

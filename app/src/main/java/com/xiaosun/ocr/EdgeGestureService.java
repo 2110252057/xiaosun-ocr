@@ -63,12 +63,69 @@ extends Service {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private EdgeGesturePrefs.Handle activeHandle;
     private static final long WATCHDOG_INTERVAL_MS = 2500L;
+
+    // ============================================================
+    //  黑名单：在前台应用命中名单时不加窗（手柄彻底不显示）
+    // ============================================================
+
+    /** 当前是否正因黑名单而「藏起来了」。 */
+    private boolean blacklistSuspended = false;
+
+    /**
+     * 当前活着的服务实例。
+     *
+     * 无障碍事件是在同一个进程里、由另一个服务（OcrAccessibilityService）
+     * 的线程报上来的，它需要能立刻把手柄服务叫醒 —— 走静态引用最省事，
+     * 也避免了为这件事额外发广播。
+     */
+    private static volatile EdgeGestureService inst;
+
+    /**
+     * 前台变了就复核一次要不要藏。
+     *
+     * 只有这一条触发路径 —— 无障碍窗口事件到达时由
+     * {@link ForegroundAppDetector} 直接推过来，是「切换应用那一刻」就到，
+     * 不存在轮询，也就不需要任何延时任务或后台线程。
+     */
+    private final Runnable blacklistOnce = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                doBlacklistCheck();
+            } catch (Throwable t) {
+                Log.w(TAG, "黑名单检查异常: " + t);
+            }
+        }
+    };
+
+    /**
+     * 前台应用可能变了 —— 由 {@link ForegroundAppDetector} 或扩展模块调用。
+     *
+     * 这段刻意做成静态方法：调用方（无障碍服务）不需要、也拿不到
+     * 手柄服务的实例引用，只要「喊一声」就行，实例自己 post 到主线程处理。
+     */
+    static void onForegroundMaybeChanged() {
+        EdgeGestureService s = inst;
+        if (s == null) return;
+        try {
+            s.ui.removeCallbacks(s.blacklistOnce);
+            s.ui.post(s.blacklistOnce);
+        } catch (Throwable ignored) {
+            // Service 刚创建或已销毁时 ui 可能尚未建立或已不可用，此处跳过一次黑名单重算。
+        }
+    }
+
     private final Runnable watchdogTask = new Runnable(){
 
         @Override
         public void run() {
             try {
-                if (EdgeGesturePrefs.isEnabled((Context)EdgeGestureService.this) && EdgeGestureService.this.canOverlay() && !EdgeGestureService.this.anyViewAttached()) {
+                // 已被黑名单藏起来时不要「救」它 —— 看门狗看到窗口不在就重建，
+                // 不加这个判断就会每 2.5 秒把被拉黑的手柄拽出来一次。
+                if (!EdgeGestureService.this.blacklistSuspended
+                        && EdgeGesturePrefs.isEnabled((Context)EdgeGestureService.this)
+                        && EdgeGestureService.this.canOverlay()
+                        && !EdgeGestureService.this.anyViewAttached()) {
                     Log.i((String)EdgeGestureService.TAG, (String)"\u770b\u95e8\u72d7\uff1a\u624b\u67c4\u7a97\u53e3\u4e0d\u5728\uff0c\u91cd\u5efa");
                     EdgeGestureService.this.rebuild();
                 }
@@ -161,6 +218,96 @@ extends Service {
         }
     }
 
+    // ============================================================
+    //  黑名单：判断 + 挂起 / 恢复
+    // ============================================================
+
+    /**
+     * 黑名单相关的「跟随配置变化」处理。
+     *
+     * 现在只有无障碍一条通道，是**事件驱动**的：窗口状态事件到达时由
+     * {@link ForegroundAppDetector} 直接推 {@link #onForegroundMaybeChanged()}，
+     * 「切换应用那一刻」就到。所以这里没有轮询、也没有延时任务要重排 ——
+     * 只剩一件事：用户关掉黑名单开关时，要把正藏着的手柄立刻放出来，
+     * 否则他会以为「关了黑名单手柄也没了」。
+     */
+    private void scheduleBlacklist() {
+        if (!EdgeGesturePrefs.isEnabled(this)) return;
+        if (EdgeGesturePrefs.isBlacklistEnabled(this)) return;
+        if (this.blacklistSuspended) {
+            this.blacklistSuspended = false;
+            this.rebuild();
+        }
+    }
+
+    /**
+     * 检查一次：当前前台应用是否命中名单，需要就藏 / 恢复。
+     *
+     * 由无障碍窗口事件驱动，一次切换只跑一次；读的是进程内静态字段，
+     * 没有跨进程调用，主线程上做没有任何成本。
+     *
+     * 【为什么「藏」用 removeAllViews 而不是 setVisibility(GONE)】
+     * 手柄窗口是常驻悬浮窗，隐藏时**必须真的把窗口摘掉**：
+     *   · 只设 GONE 的话窗口还在，它申请的系统手势排除区也仍然生效 ——
+     *     在拉黑的那些应用里，边缘返回手势照样失效，等于副作用还在；
+     *   · 摘掉窗口后，{@link #rebuild()} 在恢复时会完整重算位置、重报排除区，
+     *     比「切可见性」少一堆中间态。
+     */
+    private void doBlacklistCheck() {
+        if (!EdgeGesturePrefs.isEnabled(this)) return;
+        if (!EdgeGesturePrefs.isBlacklistEnabled(this)) {
+            this.applyBlacklistState("", false);
+            return;
+        }
+        // 还没收到过窗口事件 —— 判断不出前台是谁，当作「不在名单里」，
+        // 别让手柄莫名消失。
+        if (!ForegroundAppDetector.a11yUsable()) {
+            this.applyBlacklistState("", false);
+            return;
+        }
+        String fg = ForegroundAppDetector.currentForeground(this);
+        this.applyBlacklistState(fg, ForegroundAppDetector.isSuppressed(this, fg));
+    }
+
+    /**
+     * 把「该不该藏」这个结论落到界面上（主线程）。状态没变就什么都不做。
+     *
+     * @param fg  判断所依据的前台包名，只用于日志
+     * @param hide true = 现在应该藏起来
+     */
+    private void applyBlacklistState(String fg, boolean hide) {
+        if (!EdgeGesturePrefs.isEnabled(this)) return;
+        if (hide == this.blacklistSuspended) return;   // 状态没变，什么都不做
+
+        this.blacklistSuspended = hide;
+        if (hide) {
+            AppLog.i(TAG, "黑名单命中，隐藏手柄: " + fg
+                    + "（模式=" + (EdgeGesturePrefs.isBlacklistWhitelistMode(this) ? "白名单" : "黑名单") + "）");
+            // 先收菜单、再摘窗口：菜单是画在手柄窗口里的，
+            // 窗口一摘它自然就没了，但先走 closeMenu() 能把内部状态
+            // （menuOpen / menuItems / 选中项）一并归零，恢复时不会带着
+            // 上一次的半开状态。
+            this.closeMenuIfOpen();
+            this.removeAllViews();
+            EdgeGesturePrefs.gsHandleCount = 0;
+        } else {
+            AppLog.i(TAG, "离开黑名单，恢复手柄: " + fg);
+            this.rebuild();
+        }
+    }
+
+    /** 若某个手柄正弹着滑动菜单，把它收起来（没有就什么都不做）。 */
+    private void closeMenuIfOpen() {
+        for (View v : this.views) {
+            if (!(v instanceof GestureView)) continue;
+            try {
+                ((GestureView) v).closeMenu();
+            } catch (Throwable ignored) {
+                // 单个窗口关闭失败就继续关下一个，不能因一个窗口异常而留下其余窗口。
+            }
+        }
+    }
+
     private boolean screenOn() {
         try {
             PowerManager pm = (PowerManager)this.getSystemService("power");
@@ -218,6 +365,7 @@ extends Service {
 
     public void onCreate() {
         super.onCreate();
+        inst = this;
         // 日志要在这里就装好：手柄相关的问题（加窗失败、崩溃）
         // 全都发生在服务进程里，等用户去点界面就来不及了。
         // install() 幂等，和 MainActivity 里重复调用没有副作用。
@@ -265,9 +413,16 @@ extends Service {
         }
         isRunning = true;
         EdgeGesturePrefs.gsRunning = true;
+        // 注意顺序：refreshRuntime() 会把 gsHandleCount 重置成「配置里有几个手柄」，
+        // 而黑名单命中时 rebuild() 特意把它置成了 0。所以 refreshRuntime()
+        // 之后必须再补一次归零，否则界面上会显示「当前 N 个手柄」而屏幕上一个都没有。
         EdgeGesturePrefs.refreshRuntime((Context)this);
+        if (this.blacklistSuspended) {
+            EdgeGesturePrefs.gsHandleCount = 0;
+        }
         this.ui.removeCallbacks(this.watchdogTask);
         this.ui.postDelayed(this.watchdogTask, 2500L);
+        this.scheduleBlacklist();
         this.scheduleBurnin();
         return 1;
     }
@@ -282,6 +437,8 @@ extends Service {
         Log.i((String)TAG, (String)"\u4efb\u52a1\u88ab\u5212\u6389\uff0c\u91cd\u5efa\u624b\u67c4");
         this.ui.removeCallbacks(this.watchdogTask);
         if (EdgeGesturePrefs.isEnabled((Context)this) && this.canOverlay()) {
+            // 若正被黑名单藏着，这里也要重建 —— rebuild() 自己会判定并跳过加窗，
+            // 但必须让它跑一次去重排黑名单任务（否则恢复时机就没人管了）。
             this.rebuild();
         }
         this.ui.postDelayed(this.watchdogTask, 2500L);
@@ -289,8 +446,10 @@ extends Service {
 
     public void onDestroy() {
         isRunning = false;
+        if (inst == this) inst = null;
         this.ui.removeCallbacks(this.watchdogTask);
         this.ui.removeCallbacks(this.burninTask);
+        this.ui.removeCallbacks(this.blacklistOnce);
         EdgeGesturePrefs.gsRunning = false;
         this.removeAllViews();
         if (this.reloadReceiver != null) {
@@ -322,6 +481,40 @@ extends Service {
             this.stopSelf();
             return;
         }
+
+        // ============================================================
+        //  黑名单：判定放在「加窗之前」，而不是「加完再摘」
+        // ============================================================
+        // 【为什么必须放在最前面】
+        // rebuild() 是唯一的「把所有手柄加回屏幕」的动作，下面这些路径都会走到它：
+        //   · 屏幕旋转（onConfigurationChanged）
+        //   · 任务被划掉（onTaskRemoved）
+        //   · 配置变更广播（用户改了手柄颜色之类）
+        //   · 看门狗发现窗口丢了
+        //   · onStartCommand 发现窗口不在
+        // 全部可能在「被拉黑的应用」里发生。若在这里不判定，转个屏手柄
+        // 就在拉黑的应用里冒出来了 —— 用户会认定这功能是坏的。
+        //
+        // 【为什么不是「加完再 check 一次摘掉」】
+        // 那样窗口会真实地闪一下（addView → removeViewImmediate），
+        // 而且看门狗每隔 2.5 秒就发现「窗口不在」又重建一次，形成抖动。
+        // 判定放前面，命中时直接不加窗，干干净净。
+        if (EdgeGesturePrefs.isBlacklistEnabled(this)) {
+            String fg = ForegroundAppDetector.currentForeground(this);
+            this.blacklistSuspended = ForegroundAppDetector.isSuppressed(this, fg);
+            if (this.blacklistSuspended) {
+                EdgeGesturePrefs.gsHandleCount = 0;
+                AppLog.i(TAG, "黑名单命中，不下发手柄: " + fg
+                        + "（模式=" + (EdgeGesturePrefs.isBlacklistWhitelistMode(this)
+                            ? "白名单" : "黑名单") + "）");
+                this.scheduleBurnin();
+                this.scheduleBlacklist();
+                return;
+            }
+        } else {
+            this.blacklistSuspended = false;
+        }
+
         List<EdgeGesturePrefs.Handle> handles = EdgeGesturePrefs.getHandles((Context)this);
         int shown = 0;
         // 只做「手柄条」这一种形态：一个手柄一个窗口，各管各的触摸区。
@@ -340,6 +533,9 @@ extends Service {
         AppLog.i(TAG, "手柄重建完成: 显示 " + shown + " 个 / 配置 "
                 + handles.size() + " 个，总开关=" + EdgeGesturePrefs.isEnabled(this));
         this.scheduleBurnin();
+        // 无障碍没连上时 scheduleBlacklist() 什么也不会做，
+        // 用户会在设置页看到明确提示，而不是手柄莫名不见。
+        this.scheduleBlacklist();
     }
 
     private WindowManager.LayoutParams baseParams(boolean leftEdge) {
@@ -394,7 +590,9 @@ extends Service {
             try {
                 this.wm.removeViewImmediate(v);
             }
-            catch (Throwable throwable) {}
+            catch (Throwable throwable) {
+                // 逐个移除悬浮窗：窗口已不在时 removeViewImmediate 会抛，忽略它继续移除其余。
+            }
         }
         this.views.clear();
     }
@@ -1224,6 +1422,7 @@ extends Service {
                 float cy = cy0 - (p.descent() + p.ascent()) / 2.0f;
                 c.drawText(label, cx0, cy, p);
             } catch (Throwable ignored) {
+                // onDraw 里抛异常会让悬浮窗直接白屏，宁可这一项标签不画也不能崩。
             }
         }
 
@@ -1622,14 +1821,21 @@ extends Service {
                     }
                     if (!this.fired && (dir = EdgeGestureService.dirOf(dx, dy)) >= 0 && this.handle.enabled[dir] && dist >= (float)this.dp(this.handle.distanceOf(dir))) {
                         this.fired = true;
-                        if (this.menuConfigured() && this.tryOpenMenu(dir, e.getRawX(pi), e.getRawY(pi))) {
+                        // ★ 先问「这个方向走不走菜单」，再问「菜单配没配」。
+                        //   menuOf(dir) == false 的方向必须直接落到下面的 fire()：
+                        //   滑一下就发事件，宿主立刻收到 REQUEST_QUERY 去问方向，
+                        //   宏不用等用户在菜单上选图标。
+                        //   这正是「新建一个向左的宏，只想滑一下就触发」的路径 ——
+                        //   以前菜单是全局的，向左也会弹出来，不选图标就不发事件，
+                        //   看起来就像「宏不触发」。
+                        if (this.handle.menuOf(dir) && this.menuConfigured() && this.tryOpenMenu(dir, e.getRawX(pi), e.getRawY(pi))) {
                             // 菜单刚弹开、还没选中任何项 —— 清掉上一次的结果。
                             // 中途触摸被系统抢走（没有抬手）时，宏就不该收到
                             // 上一次的旧选中值。
                             EdgeGesturePrefs.recordMenuChoice(-1, "", "");
                             return true;
                         }
-                        // 走到这里 = 本次没有菜单（没启用菜单，或菜单没弹出来）：
+                        // 走到这里 = 本次没有菜单（该方向关了菜单，或菜单没弹出来）：
                         // 清掉上一次的选中值，免得静态字段里的陈旧值被当成本次结果
                         // 传给宏（buildMenuVars 靠 menuIndex < 0 判断「不回传」）。
                         EdgeGesturePrefs.recordMenuChoice(-1, "", "");

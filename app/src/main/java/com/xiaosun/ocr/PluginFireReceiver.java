@@ -108,6 +108,7 @@ public class PluginFireReceiver extends BroadcastReceiver {
         try {
             AppLog.install(context);
         } catch (Throwable ignored) {
+            // 日志安装失败不能影响插件本身的执行，下面还有主流程。
         }
         // ---- 记下宿主这次给的关键信息 ----
         // 排查「变量回不到某个宿主」先看这一条：
@@ -296,6 +297,7 @@ public class PluginFireReceiver extends BroadcastReceiver {
                     try {
                         pending.finish();
                     } catch (Throwable ignored) {
+                        // 广播已处理完，此时结束 pendingResult 失败不影响已写好的变量与结果码。
                     }
                 }
             }

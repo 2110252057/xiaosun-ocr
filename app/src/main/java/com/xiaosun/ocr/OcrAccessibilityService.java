@@ -26,14 +26,24 @@ import java.util.concurrent.atomic.AtomicReference;
  * 而 Android 11（API 30）给无障碍服务开了 takeScreenshot()：
  * 用户只需在系统设置里勾选一次本服务，之后**随时可截、不弹框、不需要 root**。
  *
- * 【本服务不监听任何事件】
- * 它只为「截图」这一项能力存在：onAccessibilityEvent 是空实现，
- * 不去读屏幕上的文本、控件，也不接收触摸/按键事件，
- * 因此不会碰到用户的任何内容数据。
+ * 【它监听什么】
+ * 只为「截图」这一项能力存在时，onAccessibilityEvent 本可以是空实现。
+ * 但手柄的「黑名单」功能需要一个实时的前台应用判据（悬浮窗自己不知道
+ * 用户切到了哪个 App），所以现在额外订阅了**唯一一种**事件：
+ *
+ *     TYPE_WINDOW_STATE_CHANGED —— 只从里面取 event.getPackageName()，
+ *     也就是「哪个应用到了前台」这一个字段。
+ *
+ * 不读 getText()、不读 getContentDescription()、不遍历控件树，
+ * 因此除了「包名」之外，仍然碰不到用户的任何内容数据。
+ * 不想要这个能力，把 accessibility_service_config.xml 里的
+ * accessibilityEventTypes 删掉即可 —— 代价是「手柄黑名单」失效
+ * （它只认这一条判据，见 {@link ForegroundAppDetector}），其余功能不受影响。
  *
  * 【它是可选的】
  * 不开启本服务时，应用其余功能完全不受影响 ——
- * 只是退回 root / MediaProjection 这两条老路。
+ * 只是退回 root / MediaProjection 这两条截屏老路，
+ * 以及「手柄黑名单」不会生效（判断不出前台是哪个应用，手柄照常显示）。
  */
 public class OcrAccessibilityService extends AccessibilityService {
     private static final String TAG = "XiaoSunOCR-A11yCap";
@@ -76,16 +86,34 @@ public class OcrAccessibilityService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         Log.i(TAG, "无障碍服务已连接，可截图=" + canTakeScreenshot());
+        // 把手柄黑名单的「前台应用侦测」挂到这个实例上
+        ForegroundAppDetector.bind(this, this);
         // 通知 OCRService 同步它的静态标志，否则插件仍会认为「截屏未就绪」
         try {
             OCRService.onAccessibilityStateChanged(true);
         } catch (Throwable ignored) {
+            // 服务刚连上时 OCRService 可能还没起来，通知不到就算了，下次截图会再同步。
         }
     }
 
+    /**
+     * 唯一订阅的事件：窗口状态变化（见类注释）。
+     *
+     * 这里只取包名，别的字段一个都不碰。
+     * 顺带一提为什么不用 TYPE_WINDOW_STATE_CHANGED 之外的：
+     * 内容变化（TYPE_WINDOW_CONTENT_CHANGED）会疯狂刷屏，
+     * 触摸/按键事件则属于「用户输入」，都不该为了黑名单去订阅。
+     */
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // 刻意留空：不订阅任何事件，避免触碰用户数据。
+        if (event == null) return;
+        try {
+            if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                ForegroundAppDetector.onWindowChanged(event.getPackageName());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "处理窗口事件失败: " + t);
+        }
     }
 
     @Override
@@ -96,6 +124,7 @@ public class OcrAccessibilityService extends AccessibilityService {
     @Override
     public boolean onUnbind(android.content.Intent intent) {
         instance = null;
+        ForegroundAppDetector.unbind(this);
         Log.i(TAG, "无障碍服务已断开（用户在设置里关闭了它）");
         return super.onUnbind(intent);
     }
@@ -103,9 +132,11 @@ public class OcrAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         instance = null;
+        ForegroundAppDetector.unbind(this);
         try {
             executor.shutdownNow();
         } catch (Throwable ignored) {
+            // 线程池已经关过时 shutdownNow 无副作用，忽略。
         }
         super.onDestroy();
     }
@@ -177,6 +208,7 @@ public class OcrAccessibilityService extends AccessibilityService {
                         try {
                             buffer.close();
                         } catch (Throwable ignored) {
+                            // 关闭截图缓冲区失败就放弃，图已经拿到或已经失败，这里只是收尾。
                         }
                     }
                     latch.countDown();

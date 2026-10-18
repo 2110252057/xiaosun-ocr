@@ -536,7 +536,7 @@ public final class PluginContract {
      *   宏侧判「%xsocr_menu_index 有没有值」即可知道这次是不是真的选了。
      */
     public static final String[] MENU_VARIABLES = {
-            VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始）；**没选中时本变量不出现**",
+            VAR_MENU_INDEX  + "\n菜单索引\n滑动菜单选中的项序号（从 0 开始）；没选中时本变量不出现",
             VAR_MENU_TEXT   + "\n菜单文字\n选中项的显示文字；没选中时不出现",
             VAR_MENU_ACTION + "\n菜单动作\n选中项的动作串；没选中时不出现",
     };
@@ -585,6 +585,7 @@ public final class PluginContract {
             if (t > 3599000) t = 3599000;
             intentToHost.putExtra(TASKER_EXTRAS + "REQUESTED_TIMEOUT", t);
         } catch (Throwable ignored) {
+            // 宿主给超时值不是数字时就不带这个 extra，让宿主用自己的默认值。
         }
     }
 

@@ -274,6 +274,7 @@ final class MlKitEngine {
                 item.put("conf", (double) conf);
             }
         } catch (Throwable ignored) {
+            // 置信度只是附加字段，取不到就不写，不影响其余字段。
         }
         return item;
     }

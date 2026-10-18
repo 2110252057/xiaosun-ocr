@@ -93,6 +93,7 @@ public class RootScreenCaptureManager {
                 try {
                     p.destroy();
                 } catch (Throwable ignored) {
+                    // 销毁进程失败（已退出或权限不足）不必上报，调用方只关心结果。
                 }
             }
         }
@@ -165,6 +166,7 @@ public class RootScreenCaptureManager {
                         w = Integer.parseInt(wh[0].trim());
                         h = Integer.parseInt(wh[1].trim());
                     } catch (NumberFormatException ignored) {
+                        // 系统返回的尺寸不是两个数字时保留默认值，后续按实际图尺寸兜底。
                     }
                 }
             }
@@ -177,6 +179,7 @@ public class RootScreenCaptureManager {
                 try {
                     p.destroy();
                 } catch (Throwable ignored) {
+                    // 同上：销毁进程失败忽略。
                 }
             }
         }
@@ -214,6 +217,7 @@ public class RootScreenCaptureManager {
             try {
                 png.delete();
             } catch (Throwable ignored) {
+                // 删临时截图只是清场，文件被占用时删不掉就留给下次覆盖。
             }
         }
     }
@@ -228,6 +232,7 @@ public class RootScreenCaptureManager {
         try {
             f.delete();
         } catch (Throwable ignored) {
+            // 同上：临时文件清理失败不影响本次截图的返回结果。
         }
 
         // ② 退回外部目录（部分 ROM 上 su 进程对私有目录权限受限）
@@ -239,6 +244,7 @@ public class RootScreenCaptureManager {
         try {
             fallback.delete();
         } catch (Throwable ignored) {
+            // 同上：兜底文件清理失败，此时本来就要返回 null 了。
         }
         return null;
     }
@@ -278,6 +284,7 @@ public class RootScreenCaptureManager {
                 try {
                     p.destroy();
                 } catch (Throwable ignored) {
+                    // 同上：finally 里销毁进程，失败忽略。
                 }
             }
         }

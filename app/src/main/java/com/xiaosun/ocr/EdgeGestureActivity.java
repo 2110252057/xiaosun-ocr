@@ -124,6 +124,10 @@ public class EdgeGestureActivity extends AppCompatActivity {
         bar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        // 右上角「⋮」：日志等杂项的入口，见 LogCard.buildMenuButton
+        bar.addView(LogCard.buildMenuButton(this),
+                new LinearLayout.LayoutParams(dp(40), dp(40)));
+
         return bar;
     }
 
@@ -139,9 +143,8 @@ public class EdgeGestureActivity extends AppCompatActivity {
         buildPermissionCard();
         buildHandlesCard();
         buildBurnInCard();
-        buildHelpCard();
-        // 日志卡片放最后：正常用户不会注意到它，出问题时才往下找到
-        content.addView(LogCard.build(this), cardLp());
+        buildBlacklistCard();
+        // 日志已收进顶栏「⋮」菜单（LogCard.buildMenuButton），不再占页面底部。
     }
 
     private void buildStatusCard() {
@@ -169,8 +172,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         hint.setTextSize(12);
         hint.setTextColor(C_SUB);
         hint.setLineSpacing(0f, 1.3f);
-        hint.setText("手柄贴在屏幕边缘，手指按上去朝任意方向滑动即可触发，"
-                + "滑过设定距离立刻响应，不需要抬手。");
+        hint.setText("手指按在手柄上朝任意方向滑动，滑过设定距离即触发。");
         LinearLayout.LayoutParams hl = wide();
         hl.topMargin = dp(6);
         card.addView(hint, hl);
@@ -259,8 +261,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         d.setTextSize(12);
         d.setTextColor(C_SUB);
         d.setLineSpacing(0f, 1.3f);
-        d.setText("手柄是悬浮窗，必须授予该权限才能显示。\n"
-                + "注意：这与「屏幕截屏识别」用的是同一个权限，开过一次就不用再开。");
+        d.setText("手柄是悬浮窗，必须授予此权限才能显示。");
         LinearLayout.LayoutParams dl = wide();
         dl.topMargin = dp(6);
         card.addView(d, dl);
@@ -374,15 +375,19 @@ public class EdgeGestureActivity extends AppCompatActivity {
 
         sb.append(" · ");
         boolean first = true;
+        // 直触方向单独攒起来写在末尾：列表页一眼能看出「这个方向滑了
+        // 不会弹菜单、直接发事件」，不用点进编辑页才知道。
+        StringBuilder direct = new StringBuilder();
         for (int d = 0; d < 8; d++) {
             if (!h.enabled[d]) continue;
             if (!first) sb.append(" ");
             sb.append(EdgeGesturePrefs.DIR_ARROWS[d]);
             first = false;
+            if (!h.menuOf(d)) direct.append(EdgeGesturePrefs.DIR_ARROWS[d]);
         }
         if (first) sb.append("无方向");
-
         sb.append(" · ").append(h.threshold).append("dp 触发");
+        if (direct.length() > 0) sb.append(" · 直触 ").append(direct);
         return sb.toString();
     }
 
@@ -403,43 +408,77 @@ public class EdgeGestureActivity extends AppCompatActivity {
     }
 
     // ============================================================
-    //  说明
+    //  黑名单入口
     // ============================================================
 
-    private void buildHelpCard() {
+    /**
+     * 「哪些应用里不显示手柄」的入口卡。
+     *
+     * 这里只做一句话状态 + 一个跳转，名单的编辑都在
+     * {@link EdgeGestureBlacklistActivity} 里 —— 应用列表要滚动、要搜索，
+     * 塞进本页会把这一页撑得又长又乱。
+     */
+    private void buildBlacklistCard() {
         LinearLayout card = card();
-        card.addView(label("怎么和宏配合"), wide());
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
 
         TextView t = new TextView(this);
-        t.setTextSize(12);
-        t.setTextColor(C_SUB);
-        t.setLineSpacing(0f, 1.45f);
-        t.setText(
-                "宏 → 触发器 → 「小孙OCR · 边缘滑动事件」\n"
-                        + "  （在宿主的「事件」分类里，别选到别的插件）\n"
-                        + "  再选一个方向 —— 每个宏只认这一个方向，互不干扰。\n"
-                        + "  方向不符的宏根本不会被触发，宏里不用再判断方向。\n"
-                        + "\n  滑出菜单选中后，插件把结果交给宏：\n"
-                        + "    菜单索引    选中项序号（从 0 开始；-1 = 取消）\n"
-                        + "    菜单文字    选中项的名字\n"
-                        + "    菜单动作    选中项的动作值\n"
-                        + "    （变量名在 MacroDroid 里自己定，本应用不预设）"
-        );
-        LinearLayout.LayoutParams tl = wide();
-        tl.topMargin = dp(8);
-        card.addView(t, tl);
+        t.setText("手柄黑名单");
+        t.setTextSize(14.5f);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
 
-        TextView tip = new TextView(this);
-        tip.setTextSize(11.5f);
-        tip.setTextColor(C_HINT);
-        tip.setLineSpacing(0f, 1.35f);
-        tip.setText("\n小技巧：手动长按手柄可以直接拖动位置，松手自动保存；"
-                + "想改颜色和大小就点它进编辑页。\n"
-                + "开启「滑动菜单」后，滑过距离不会立即触发，"
-                + "而是弹出一排按钮，滑到哪个抬手就是哪个。");
-        LinearLayout.LayoutParams til = wide();
-        til.topMargin = dp(8);
-        card.addView(tip, til);
+        TextView s = new TextView(this);
+        s.setTextSize(11.5f);
+        s.setTextColor(C_HINT);
+        s.setLineSpacing(0f, 1.3f);
+        boolean on = EdgeGesturePrefs.isBlacklistEnabled(this);
+        int n = EdgeGesturePrefs.getBlacklist(this).size();
+        boolean white = EdgeGesturePrefs.isBlacklistWhitelistMode(this);
+        if (!on) {
+            s.setText("未开启 · 手柄在所有应用里都显示");
+        } else if (n == 0) {
+            s.setText("已开启 · 名单为空，暂时不会隐藏");
+        } else {
+            s.setText((white ? "白名单" : "黑名单") + " · " + n + " 个应用"
+                    + (white ? "显示手柄，其余不显示" : "不显示手柄"));
+        }
+        col.addView(s);
+
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(20);
+        arrow.setTextColor(C_HINT);
+        arrow.setPadding(dp(8), 0, 0, 0);
+        row.addView(arrow);
+
+        row.setOnClickListener(v -> EdgeGestureBlacklistActivity.open(this));
+
+        card.addView(row, wide());
+
+        // 开启了但侦测通道没就绪时，这里直接点出来 —— 否则用户配完名单
+        // 发现没效果，会以为是自己操作错了。
+        if (on && !ForegroundAppDetector.anyChannel(this)) {
+            TextView warn = new TextView(this);
+            warn.setTextSize(11.5f);
+            warn.setTextColor(C_WARN);
+            warn.setLineSpacing(0f, 1.35f);
+            warn.setText("⚠ 前台应用侦测未就绪（没开无障碍），"
+                    + "黑名单暂时不会生效。点进去开启。");
+            LinearLayout.LayoutParams wl = wide();
+            wl.topMargin = dp(8);
+            card.addView(warn, wl);
+        }
 
         content.addView(card, cardLp());
     }
@@ -545,10 +584,8 @@ public class EdgeGestureActivity extends AppCompatActivity {
         hint.setTextSize(12);
         hint.setTextColor(C_SUB);
         hint.setLineSpacing(0f, 1.3f);
-        hint.setText("手柄是常驻的悬浮条，位置常年不动，OLED 屏会顺着它的形状"
-                + "慢慢留下残影。开启后手柄会隔一段时间在垂直方向轻微挪动几像素 —— "
-                + "肉眼几乎看不出，但发光像素错开了，残影就不容易堆积。"
-                + "\n只上下挪、不左右挪，所以手柄始终贴着屏幕边缘。");
+        hint.setText("手柄常驻不动，OLED 屏会留下残影。开启后手柄会隔一段时间"
+                + "轻微上下挪几像素，肉眼几乎看不出，但足以错开发光像素。");
         LinearLayout.LayoutParams hl = wide();
         hl.topMargin = dp(6);
         card.addView(hint, hl);
@@ -602,8 +639,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         tip.setTextSize(11.5f);
         tip.setTextColor(C_HINT);
         tip.setLineSpacing(0f, 1.35f);
-        tip.setText("幅度越大越保险，越小越不显眼。幅度 0 = 不漂移。"
-                + "\n间隔指的是「每隔多久换一次位置」，不需要太频繁。");
+        tip.setText("幅度越大越保险，越小越不显眼。0 = 不漂移。");
         LinearLayout.LayoutParams tl = wide();
         tl.topMargin = dp(10);
         card.addView(tip, tl);

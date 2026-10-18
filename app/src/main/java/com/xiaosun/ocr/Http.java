@@ -71,6 +71,7 @@ final class Http {
                 try {
                     conn.disconnect();
                 } catch (Throwable ignored) {
+                    // 断开连接本身失败不影响返回结果，这里在 finally 里调用。
                 }
             }
         }
@@ -111,6 +112,7 @@ final class Http {
                 try {
                     conn.disconnect();
                 } catch (Throwable ignored) {
+                    // 同上：finally 里断开连接，失败忽略。
                 }
             }
         }
@@ -143,6 +145,7 @@ final class Http {
                 try {
                     conn.disconnect();
                 } catch (Throwable ignored) {
+                    // 同上：finally 里断开连接，失败忽略。
                 }
             }
         }

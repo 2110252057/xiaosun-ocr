@@ -2,13 +2,9 @@ package com.xiaosun.ocr;
 
 import android.app.Activity;
 import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -19,7 +15,7 @@ import java.io.File;
 import java.util.List;
 
 /**
- * 「日志」卡片 —— 设置页里给用户的操作入口。
+ * 日志的入口 —— 顶栏右上角「⋮」。
  *
  * ════════════════════════════════════════════════════════════════
  * 【为什么用户会需要它】
@@ -28,112 +24,139 @@ import java.util.List;
  * 复现不出来。这时候唯一的路是拿到对方设备上的现场记录 —— 但要求
  * 普通用户去开 USB 调试、装 adb 抓 logcat 是不现实的。
  *
- * 所以这一页要把「抓日志」这件事压缩成**一次点击**：
- *   分享日志  → 直接拉起微信/QQ/邮件，选人发出去
- *   导出到下载 → 落到公共下载目录（微信聊天里选「文件」也能拿到）
+ * 所以这里把「抓日志」这件事压缩成两步：点「⋮」→ 点「分享日志」。
  *
  * ════════════════════════════════════════════════════════════════
- * 【为什么这个类是 static 的一坨 UI 代码】
+ * 【为什么从卡片改成了顶栏菜单】
  * ════════════════════════════════════════════════════════════════
- * 本工程没有任何 XML 布局、也没有 ViewBinding，界面全是
- * new TextView(this) 手搭出来的。而「边缘滑动设置页」和「OCR 设置页」
- * 是两个互不继承的 Activity，没法共用成员方法。
+ * 原先是一整张日志卡片压在页面最底部：平时用不上，却要先滚过大半页
+ * 才看得到；真出问题时它又离手指最远。改成顶栏一个「⋮」之后，
+ * 位置固定、不用滚动，页面本身也短了一截。
  *
- * 与其把同一段卡片代码抄两遍（迟早会改漏一处），不如抽成这个
- * 静态工具类 —— 两边都调 {@link #build(Activity)} 即可。
+ * 【为什么是 static 工具类】
+ * 本工程没有 XML 布局也没有 ViewBinding，界面全是 new TextView(this)
+ * 手搭的。「OCR 设置页」和「边缘滑动设置页」是两个互不继承的 Activity，
+ * 没法共用成员方法，与其把菜单代码抄两遍（迟早改漏一处），不如都调
+ * {@link #buildMenuButton(Activity)}。
  */
 final class LogCard {
-
-    // 配色与本应用其它卡片保持一致
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_SURFACE = 0xFFFFFFFF;
 
     private LogCard() {
     }
 
-    /** 造一张「日志」卡片。调用方把它加进自己的页面即可。 */
-    static View build(final Activity a) {
-        LinearLayout card = new LinearLayout(a);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(rounded(C_SURFACE, C_DIVIDER, 14, a));
-        card.setPadding(dp(a, 16), dp(a, 14), dp(a, 16), dp(a, 14));
-        card.setElevation(dp(a, 1));
+    /**
+     * 顶栏右上角的「⋮」按钮 —— 日志、隐藏任务、保活这些杂项的统一入口。
+     *
+     * 原先它们是页面里的两三张卡片，压在最底部：平时用不上，却要先滚过
+     * 大半页才看得到；出问题时又最难找。收进顶栏之后，一个位置就能找到，
+     * 页面本身也短了一截。
+     *
+     * @param extras 额外菜单项（可为 null）。宿主可以把自己特有的
+     *               开关塞进来，例如 OCR 页的「从最近任务隐藏」「后台保活」。
+     *               本类不关心它们是什么，只负责把它们排在日志四项之前
+     *               —— 宿主的常用开关在上面，日志这种排障功能垫底。
+     */
+    static View buildMenuButton(final Activity a, final MenuItem... extras) {
+        TextView more = new TextView(a);
+        more.setText("⋮");
+        more.setTextSize(22);
+        more.setTextColor(Color.WHITE);
+        more.setGravity(Gravity.CENTER);
+        more.setContentDescription("更多");
+        more.setOnClickListener(v -> showMoreMenu(a, extras));
+        return more;
+    }
 
-        TextView title = new TextView(a);
-        title.setText("日志");
-        title.setTextSize(14.5f);
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setTextColor(C_TEXT);
-        card.addView(title);
+    /**
+     * 三点菜单里的一项：标题 + 点击回调。
+     *
+     * 【为什么标题有两种形态】
+     * 宿主菜单项要显示当前状态（「从最近任务隐藏：已开」）。如果标题在
+     * 建顶栏时就固化成 String，用户点一下切换之后，再打开菜单看到的还是
+     * 旧状态 —— 除非整页重建。所以留一个 {@link Title} 重载，每次弹菜单现算。
+     * （没用 java.util.function.Supplier：本工程 minSdk 24，自己定义一个
+     * 两行接口比赌脱糖配置更稳。）
+     */
+    static final class MenuItem {
+        /** 标题来源：固定字符串，或每次弹菜单现算。 */
+        interface Title {
+            String get();
+        }
 
-        final TextView info = new TextView(a);
-        info.setTextSize(11.5f);
-        info.setTextColor(C_HINT);
-        info.setPadding(0, dp(a, 4), 0, 0);
-        info.setText("当前记录：" + AppLog.stat(a));
-        card.addView(info);
+        private final String fixed;
+        private final Title dynamic;
+        final Runnable action;
 
-        TextView hint = new TextView(a);
-        hint.setTextSize(11.5f);
-        hint.setTextColor(C_SUB);
-        hint.setLineSpacing(0f, 1.35f);
-        hint.setText("遇到崩溃或功能异常时，点「分享日志」把文件发过来即可 —— "
-                + "崩溃会自动记录，不需要你复现时做任何操作。");
-        LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        hl.topMargin = dp(a, 8);
-        card.addView(hint, hl);
+        MenuItem(String title, Runnable action) {
+            this.fixed = title;
+            this.dynamic = null;
+            this.action = action;
+        }
 
-        // ---------- 第一行：分享 / 导出 ----------
-        LinearLayout row1 = new LinearLayout(a);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams r1lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        r1lp.topMargin = dp(a, 12);
-        row1.setLayoutParams(r1lp);
+        MenuItem(Title title, Runnable action) {
+            this.fixed = null;
+            this.dynamic = title;
+            this.action = action;
+        }
 
-        Button share = primary(a, "分享日志");
-        share.setOnClickListener(v -> {
-            // 带上设备信息一起发 —— 排障第一问永远是「什么机型、什么系统」
-            String extra = "小孙OCR 日志\n\n" + AppLog.deviceInfo(a);
-            if (AppLog.share(a, extra)) {
-                toast(a, "选择要发送到的应用");
-            } else {
-                toast(a, "还没有日志可发，先复现一次问题");
-            }
-        });
-        row1.addView(share, weight());
-        row1.addView(secondary(a, "导出到下载", v -> {
-            File f = AppLog.exportToDownloads(a);
-            if (f != null) {
-                toast(a, "已导出：Download/" + f.getName());
-            } else {
-                toast(a, "导出失败（没有日志或存储不可用）");
-            }
-        }), weight());
-        card.addView(row1);
+        /** 每次弹菜单都调一次，保证显示的是当前状态。 */
+        String title() {
+            return dynamic != null ? dynamic.get() : fixed;
+        }
+    }
 
-        // ---------- 第二行：查看 / 清空 ----------
-        LinearLayout row2 = new LinearLayout(a);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams r2lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        r2lp.topMargin = dp(a, 4);
-        row2.setLayoutParams(r2lp);
+    /** 三点菜单本体：宿主塞进来的附加项在前，日志四项在后。 */
+    private static void showMoreMenu(final Activity a, final MenuItem[] extras) {
+        int extraCount = extras == null ? 0 : extras.length;
 
-        row2.addView(secondary(a, "查看日志", v -> showLog(a, info)), weight());
-        row2.addView(secondary(a, "清空日志", v -> {
-            AppLog.clear(a);
-            info.setText("当前记录：" + AppLog.stat(a));
-            toast(a, "日志已清空");
-        }), weight());
-        card.addView(row2);
+        final String[] ops = new String[extraCount + 4];
+        for (int i = 0; i < extraCount; i++) {
+            // 每次弹菜单现取标题：开关状态可能在两次打开之间变过
+            ops[i] = extras[i].title();
+        }
+        ops[extraCount] = "查看日志";
+        ops[extraCount + 1] = "分享日志";
+        ops[extraCount + 2] = "导出到下载";
+        ops[extraCount + 3] = "清空日志";
 
-        return card;
+        new AlertDialog.Builder(a)
+                .setTitle("更多")
+                .setItems(ops, (d, which) -> {
+                    if (which < extraCount) {
+                        extras[which].action.run();
+                        return;
+                    }
+                    switch (which - extraCount) {
+                        case 0:
+                            // 传入 null：菜单模式下没有卡片里的那行「当前记录」要刷新
+                            showLog(a, null);
+                            break;
+                        case 1: {
+                            // 带上设备信息一起发 —— 排障第一问永远是「什么机型、什么系统」
+                            String extra = "小孙OCR 日志\n\n" + AppLog.deviceInfo(a);
+                            if (AppLog.share(a, extra)) {
+                                toast(a, "选择要发送到的应用");
+                            } else {
+                                toast(a, "还没有日志可发，先复现一次问题");
+                            }
+                            break;
+                        }
+                        case 2: {
+                            File f = AppLog.exportToDownloads(a);
+                            if (f != null) {
+                                toast(a, "已导出：Download/" + f.getName());
+                            } else {
+                                toast(a, "导出失败（没有日志或存储不可用）");
+                            }
+                            break;
+                        }
+                        default:
+                            AppLog.clear(a);
+                            toast(a, "日志已清空");
+                            break;
+                    }
+                })
+                .show();
     }
 
     /**
@@ -141,11 +164,13 @@ final class LogCard {
      *
      * 为什么不读文件：内存里那 300 条正好是「最近发生了什么」，
      * 而且不用处理大文件的读取与编码问题。要看全量就用「分享/导出」。
+     *
+     * @param info 卡片里那行「当前记录：…」；从三点菜单进来时传 null。
      */
     private static void showLog(Activity a, TextView info) {
         try {
             List<String> lines = AppLog.recent();
-            info.setText("当前记录：" + AppLog.stat(a));
+            if (info != null) info.setText("当前记录：" + AppLog.stat(a));
             if (lines.isEmpty()) {
                 toast(a, "还没有日志");
                 return;
@@ -178,40 +203,6 @@ final class LogCard {
     // ============================================================
     //  小控件
     // ============================================================
-
-    private static Button primary(Activity a, String text) {
-        Button b = new Button(a);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setTextColor(Color.WHITE);
-        b.setBackground(rounded(C_BRAND, 0, 10, a));
-        return b;
-    }
-
-    private static Button secondary(Activity a, String text, View.OnClickListener l) {
-        Button b = new Button(a);
-        b.setText(text);
-        b.setAllCaps(false);
-        b.setTextColor(C_TEXT);
-        b.setBackground(rounded(0xFFF1F2F6, C_DIVIDER, 10, a));
-        b.setOnClickListener(l);
-        return b;
-    }
-
-    private static GradientDrawable rounded(int fill, int stroke, float radiusDp, Activity a) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(fill);
-        g.setCornerRadius(dp(a, radiusDp));
-        if (stroke != 0) g.setStroke(dp(a, 1), stroke);
-        return g;
-    }
-
-    private static LinearLayout.LayoutParams weight() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        lp.setMarginEnd(0);
-        return lp;
-    }
 
     private static int dp(Activity a, float v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,

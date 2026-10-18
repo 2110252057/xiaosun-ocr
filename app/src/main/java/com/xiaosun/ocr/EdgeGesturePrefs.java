@@ -1,7 +1,10 @@
 package com.xiaosun.ocr;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -11,6 +14,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -97,6 +102,15 @@ public final class EdgeGesturePrefs {
     private static final String KEY_MENU_GAP = "menu_gap";
     /** 环与环之间的间距（dp）。 */
     private static final String KEY_MENU_RING_GAP = "menu_ring_gap";
+
+    // ---------------- 黑名单 ----------------
+
+    /** 黑名单总开关（默认 false = 不按应用隐藏手柄）。 */
+    private static final String KEY_BLACKLIST = "blacklist_enabled";
+    /** 名单里的包名，逗号分隔。 */
+    private static final String KEY_BLACKLIST_PKGS = "blacklist_pkgs";
+    /** 名单语义：false=黑名单（名单内不显示），true=白名单（只名单内显示）。 */
+    private static final String KEY_BLACKLIST_MODE_WHITE = "blacklist_mode_white";
 
     private EdgeGesturePrefs() {
     }
@@ -206,6 +220,35 @@ public final class EdgeGesturePrefs {
         public boolean[] enabled = new boolean[8];
         /** 每个方向独立的距离阈值（dp）；<=0 表示沿用 {@link #threshold}。 */
         public int[] distance = new int[8];
+
+        /**
+         * 每个方向滑过之后，是**弹滑动菜单**还是**直接触发事件**。
+         *
+         * ══ 为什么需要按方向分别决定 ═══════════════════════════════
+         * 菜单原本是个全局开关：只要开了菜单、方向也启用，那么**任何**
+         * 方向滑过都会先弹菜单。于是出现两种「明明配了却不生效」：
+         *
+         *   ① 你在宏里新建了一个「向左」触发器，滑向左 —— 菜单弹出来了，
+         *      但你没在菜单上选任何图标，抬手处不在图标上 → 按设计
+         *      「没选中就什么都不发」，宿主根本收不到事件，宏不触发。
+         *   ② 你只给左下 / 左上配了宏，把八个方向全勾上之后，
+         *      滑任意方向都弹菜单，包括那些根本没有宏在等它的方向。
+         *
+         * 根因是同一个：**「弹菜单」是全方向的，而宏是分方向的**。
+         * 这两个维度必须能分别配置，所以每个方向一个布尔。
+         *
+         * ══ 两个取值的含义 ═════════════════════════════════════
+         *   true  = 滑过该方向 → 弹菜单，选完图标才发事件（原行为）
+         *   false = 滑过该方向 → 不弹菜单，立刻发事件，宿主直接问方向
+         *
+         * 想「一个方向走菜单、另一个方向走直触」时，各配各的即可。
+         *
+         * ══ 默认值为什么是 true ═════════════════════════════════
+         * 保持升级前的行为不变：老配置里没有这个字段，读出来当 true，
+         * 菜单照旧弹。用户若不需要某个方向弹菜单，到编辑页关掉它就行。
+         */
+        public boolean[] menuByDir = new boolean[8];
+
         /** 是否震动反馈。 */
         public boolean haptic = true;
 
@@ -234,6 +277,15 @@ public final class EdgeGesturePrefs {
             // 默认只开「向左 / 向右」两个方向 —— 手柄在边缘，这两个最顺手。
             enabled[DIR_LEFT] = true;
             enabled[DIR_RIGHT] = true;
+
+            // 每个方向默认「走菜单」（= 升级前的行为）。用户要某个方向
+            // 直接触发宏，在编辑页把该方向的「弹菜单」关掉即可。
+            for (int i = 0; i < 8; i++) menuByDir[i] = true;
+        }
+
+        /** 该方向滑过后是否弹菜单（false = 直接发事件给宿主）。 */
+        public boolean menuOf(int dir) {
+            return dir >= 0 && dir < 8 && menuByDir[dir];
         }
 
         /** 该方向生效的距离阈值（dp）。 */
@@ -653,6 +705,142 @@ public final class EdgeGesturePrefs {
         sp(c).edit().putInt(KEY_MENU_HIT_SCALE, Math.max(100, Math.min(300, v))).apply();
     }
 
+    // ============================================================
+    //  黑名单（哪些应用里不显示手柄）
+    // ============================================================
+
+    /** 黑名单总开关。默认关 —— 不开就完全不影响现有的手柄行为。 */
+    public static boolean isBlacklistEnabled(Context c) {
+        return sp(c).getBoolean(KEY_BLACKLIST, false);
+    }
+
+    public static void setBlacklistEnabled(Context c, boolean on) {
+        sp(c).edit().putBoolean(KEY_BLACKLIST, on).apply();
+    }
+
+    /**
+     * 是否用「白名单」语义：名单里的**才显示**手柄，其余全不显示。
+     *
+     * 和黑名单共用同一份包名列表，只差一个取反 —— 这样用户不必在
+     * 两套名单之间来回搬数据，想反着来只要拨一个开关。
+     */
+    public static boolean isBlacklistWhitelistMode(Context c) {
+        return sp(c).getBoolean(KEY_BLACKLIST_MODE_WHITE, false);
+    }
+
+    public static void setBlacklistWhitelistMode(Context c, boolean white) {
+        sp(c).edit().putBoolean(KEY_BLACKLIST_MODE_WHITE, white).apply();
+    }
+
+    /** 名单里的包名（不含名字，名字每次现查，改名后不会过时）。 */
+    public static List<String> getBlacklist(Context c) {
+        List<String> out = new ArrayList<>();
+        String raw = sp(c).getString(KEY_BLACKLIST_PKGS, "");
+        if (raw == null || raw.length() == 0) return out;
+        for (String p : raw.split(",")) {
+            if (p == null) continue;
+            String t = p.trim();
+            // 包名是大小写敏感的字面量，不做任何大小写归一
+            if (t.length() > 0 && !out.contains(t)) out.add(t);
+        }
+        return out;
+    }
+
+    public static void setBlacklist(Context c, List<String> pkgs) {
+        StringBuilder sb = new StringBuilder();
+        if (pkgs != null) {
+            for (String p : pkgs) {
+                if (p == null) continue;
+                String t = p.trim();
+                if (t.length() == 0) continue;
+                if (sb.indexOf(t) >= 0) continue;   // 去重，省得名单越滚越长
+                if (sb.length() > 0) sb.append(',');
+                sb.append(t);
+            }
+        }
+        sp(c).edit().putString(KEY_BLACKLIST_PKGS, sb.toString()).apply();
+    }
+
+    public static boolean isBlacklisted(Context c, String pkg) {
+        if (pkg == null || pkg.length() == 0) return false;
+        return getBlacklist(c).contains(pkg);
+    }
+
+    /** 加进名单；返回 true 表示确实新增了（原来没有）。 */
+    public static boolean addBlacklist(Context c, String pkg) {
+        if (pkg == null) return false;
+        String t = pkg.trim();
+        if (t.length() == 0) return false;
+        List<String> all = getBlacklist(c);
+        if (all.contains(t)) return false;
+        all.add(t);
+        setBlacklist(c, all);
+        return true;
+    }
+
+    public static boolean removeBlacklist(Context c, String pkg) {
+        List<String> all = getBlacklist(c);
+        if (!all.remove(pkg)) return false;
+        setBlacklist(c, all);
+        return true;
+    }
+
+    /**
+     * 按名字搜索本机已安装应用（给「添加」页用）。
+     *
+     * 只返回**带启动图标**的应用（有 LAUNCHER intent 的）：
+     * 系统组件、服务型应用列一堆在里面，用户根本挑不过来。
+     *
+     * @param query 空串 = 列出全部
+     */
+    public static List<AppEntry> searchInstalledApps(Context c, String query) {
+        List<AppEntry> out = new ArrayList<>();
+        if (c == null) return out;
+        try {
+            PackageManager pm = c.getPackageManager();
+            Intent launcher = new Intent(Intent.ACTION_MAIN);
+            launcher.addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> list = pm.queryIntentActivities(launcher, 0);
+            String q = query == null ? "" : query.trim().toLowerCase();
+            String self = c.getPackageName();
+            for (ResolveInfo ri : list) {
+                if (ri == null || ri.activityInfo == null) continue;
+                String pkg = ri.activityInfo.packageName;
+                if (pkg == null || pkg.equals(self)) continue;   // 自己不列：自己不会遮自己
+                CharSequence labelCs = ri.loadLabel(pm);
+                String label = labelCs == null ? pkg : labelCs.toString();
+                if (q.length() > 0
+                        && !label.toLowerCase().contains(q)
+                        && !pkg.toLowerCase().contains(q)) {
+                    continue;
+                }
+                out.add(new AppEntry(pkg, label));
+            }
+            // 按名字排，中文按 Unicode 码位排，不追求完美的拼音序，
+            // 但至少让同一次打开里的顺序稳定下来。
+            Collections.sort(out, new Comparator<AppEntry>() {
+                @Override
+                public int compare(AppEntry a, AppEntry b) {
+                    return a.label.compareToIgnoreCase(b.label);
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "枚举已安装应用失败: " + t);
+        }
+        return out;
+    }
+
+    /** 已安装应用的轻量条目（包名 + 显示名）。 */
+    static class AppEntry {
+        final String pkg;
+        final String label;
+
+        AppEntry(String pkg, String label) {
+            this.pkg = pkg;
+            this.label = label == null ? pkg : label;
+        }
+    }
+
     // ---------------- 手柄列表 ----------------
 
     public static List<Handle> getHandles(Context c) {
@@ -681,6 +869,7 @@ public final class EdgeGesturePrefs {
                 try {
                     arr.put(toJson(h));
                 } catch (Throwable ignored) {
+                    // 单个手柄序列化失败就跳过这一条，避免一条脏数据让整个配置都存不下去。
                 }
             }
         }
@@ -735,12 +924,17 @@ public final class EdgeGesturePrefs {
 
         JSONArray en = new JSONArray();
         JSONArray di = new JSONArray();
+        JSONArray mn = new JSONArray();
         for (int i = 0; i < 8; i++) {
             en.put(h.enabled[i]);
             di.put(h.distance[i]);
+            mn.put(h.menuByDir[i]);
         }
         o.put("enabled", en);
         o.put("distance", di);
+        // 每个方向「弹菜单 / 直触」的开关。老版本读到不认识的键会忽略，
+        // 所以多存一个键不会破坏向下兼容。
+        o.put("menuByDir", mn);
         return o;
     }
 
@@ -768,12 +962,16 @@ public final class EdgeGesturePrefs {
 
         JSONArray en = o.optJSONArray("enabled");
         JSONArray di = o.optJSONArray("distance");
+        JSONArray mn = o.optJSONArray("menuByDir");
         boolean any = false;
         for (int i = 0; i < 8; i++) {
             boolean v = en != null && en.optBoolean(i, false);
             h.enabled[i] = v;
             if (v) any = true;
             h.distance[i] = di == null ? 0 : clamp(di.optInt(i, 0), 0, 600);
+            // ★ 缺省 true：老配置里没有这个字段，读出来必须当「弹菜单」，
+            //   否则升级后所有方向都变成直触，菜单看起来像坏了。
+            h.menuByDir[i] = mn == null || mn.optBoolean(i, true);
         }
         // 一个方向都没开的手柄等于摆设，兜底打开左右。
         if (!any) {
@@ -845,23 +1043,32 @@ public final class EdgeGesturePrefs {
     /**
      * 把「要监听的方向」**排他地**写到**所有手柄**的可触发方向里。
      *
-     * ── 为什么需要它 ─────────────────────────────────────
-     * MacroDroid / Tasker 的触发器里用户已经选过一次方向了（"向上"、"向右"…）。
-     * 但手势的生效判定在服务里是 {@code handle.enabled[dir]} ——
-     * 方向没在手柄里打开，滑了也不触发。于是用户配完触发器还得回到
-     * 手柄编辑页把同一个方向再勾一遍，两处配置割裂、极易漏掉。
-     * 本方法就是把触发器选的那个方向直接落到手柄上。
+     * ── ★ 当前没有任何调用方（2025-10 起）───────────────────
+     * 它原先被 {@code PluginEditActivity.saveConfig()} 在每次保存触发器时调用，
+     * 结果造成一个严重 bug：
+     * <pre>
+     *   配「向左下」→ 七向全关，只留 down_left
+     *   配「向左上」→ 又把 down_left 关掉，只留 up_left
+     *   于是左下滑根本不会触发，第一个触发器永远不成立
+     * </pre>
+     * 用户「配了两个方向，只有后配的那个生效」就是它造成的。
      *
-     * ── 为什么是「排他」而不是「追加」 ───────────────────
-     * 触发器里选了哪个方向，意图就是"我只监听这一个"。
-     * 若只做追加，用户把「左下」改成「左上」之后左下仍然开着 ——
-     * 左下滑一下照样触发，宏会跑在意料之外的方向上。
-     * 所以这里**以触发器为准**：选中的打开，其余一律关掉。
-     * 想同时监听多个方向，到手柄编辑页手动开（那里能看到每个方向的状态）。
+     * 根因是**职责错位**：插件配置表达的是「哪个方向算我的」，
+     * 手柄方向表达的是「能滑出哪些方向」，两者是不同的问题，
+     * 却共用一份 {@code handle.enabled[]}，谁后写谁赢。
+     *
+     * 现在两者已解耦：插件侧只读不写（见 {@code PluginEditActivity.checkDirReady}），
+     * 手柄方向只由「滑动触发 → 手柄 → 方向」修改。
+     *
+     * ── 那为什么还留着这个方法 ─────────────────────────────
+     * 方法本身是纯数据写入，没有副作用，将来若真需要「一键批量设置所有手柄方向」
+     * 的界面（比如导入配置包），它是现成的。留着比删掉更省事。
+     * **新代码不要调用它**，除非你明确就是要覆盖用户的手柄方向。
      *
      * @param dirKey 方向名（{@link #DIR_KEYS} 里的值）；
      *               空串或 null = 任意方向，八个方向全部打开
      * @return 真正被改动的方向个数（0 = 无需改动）
+     * @see #getHandles(Context)
      */
     public static int setDirectionsForAllHandles(Context c, String dirKey) {
         try {
@@ -904,11 +1111,79 @@ public final class EdgeGesturePrefs {
         }
     }
 
+    /**
+     * 读出「某个方向滑过之后弹不弹菜单」的当前状态。
+     *
+     * 同一个方向可能在多个手柄上都开着，配置却只有一份 —— 这里按
+     * 「任意一个手柄该方向是直触，就算直触」来收敛：
+     * 只要有一处不走菜单，用户滑动时是想直接触发的可能性更高，
+     * 界面上也就显示「直触」，和 {@code checkDirReady} 的判定保持一致。
+     *
+     * @param dirKey 方向名（{@link #DIR_KEYS} 里的值）
+     * @return true = 菜单，false = 直触；方向名不认识或读失败时返回 true（菜单）
+     */
+    public static boolean isMenuForDir(Context c, String dirKey) {
+        int idx = dirIndexOf(dirKey);
+        if (idx < 0) return true;
+        try {
+            List<Handle> all = getHandles(c);
+            if (all != null) {
+                for (Handle h : all) {
+                    if (h == null || h.menuByDir == null) continue;
+                    if (!h.enabled[idx]) continue;
+                    if (!h.menuByDir[idx]) return false;
+                }
+            }
+        } catch (Throwable ignored) {
+            // 读失败就按默认（菜单）显示，不因此拦住用户
+        }
+        return true;
+    }
+
+    /**
+     * 把「某个方向滑过之后弹不弹菜单」写进所有手柄。**只动这一个方向**，
+     * 不碰 {@code enabled[]}，也不碰其它七个方向 —— 这是与
+     * {@link #setDirectionsForAllHandles} 最本质的区别（后者已废弃）。
+     *
+     * @return 真正被改动的处数（0 = 无需改动或失败）
+     */
+    public static int setMenuForDir(Context c, String dirKey, boolean menu) {
+        int idx = dirIndexOf(dirKey);
+        if (idx < 0) return 0;
+        try {
+            List<Handle> all = getHandles(c);
+            if (all == null || all.isEmpty()) return 0;
+            int changed = 0;
+            for (Handle h : all) {
+                if (h == null) continue;
+                if (h.menuByDir == null) h.menuByDir = new boolean[DIR_KEYS.length];
+                if (h.menuByDir[idx] != menu) {
+                    h.menuByDir[idx] = menu;
+                    changed++;
+                }
+            }
+            if (changed > 0) saveHandles(c, all);
+            return changed;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** 方向名 → 下标；不认识或空串返回 -1。 */
+    private static int dirIndexOf(String dirKey) {
+        if (dirKey == null || dirKey.isEmpty()) return -1;
+        for (int i = 0; i < DIR_KEYS.length; i++) {
+            if (DIR_KEYS[i].equals(dirKey)) return i;
+        }
+        return -1;
+    }
+
     /** 每触发一次就刷新一次运行时快照。 */
     public static void refreshRuntime(Context c) {
         try {
             gsHandleCount = getHandles(c).size();
         } catch (Throwable ignored) {
+            // 读配置失败时保留上一次的手柄数量即可，这只是给插件变量用的展示值。
         }
     }
 
@@ -941,6 +1216,7 @@ public final class EdgeGesturePrefs {
                 v.vibrate(ms);
             }
         } catch (Throwable ignored) {
+            // 设备没有振动器、或系统在后台拒绝振动时直接放弃；震动只是反馈。
         }
     }
 }
