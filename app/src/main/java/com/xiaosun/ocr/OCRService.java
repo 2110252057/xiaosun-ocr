@@ -107,6 +107,32 @@ public class OCRService extends Service {
 
     /** 最近一次「截屏识别」时屏幕画面的缓存文件路径（供界面显示预览）。 */
     public static volatile String lastCapturePath = null;
+    /**
+     * 区域识别：最近一次**整张全屏图**的像素尺寸。
+     *
+     * 【为什么不能只用 lastOcrImageWidth】
+     * 区域识别时送进引擎的只是全屏图里裁出来的一小块，所以
+     * lastOcrImageWidth/Height 记的是**裁剪块**的尺寸 —— 那是引擎视角，
+     * 不是屏幕视角。而界面画框、插件取坐标要的都是「全屏坐标系」，
+     * 两者差着一个偏移量。于是这里单独记一份全图尺寸，
+     * 配合下面两个偏移量完成换算：
+     *
+     *   全屏坐标 = 识别坐标 + (lastRegionLeft, lastRegionTop)
+     *   预览坐标 = 全屏坐标 × (预览图尺寸 / lastFullImageWidth)
+     *
+     * 【不做区域识别时退化回原行为】
+     * 此时 lastRegionLeft/Top 均为 0、lastFullImageWidth 等于 lastOcrImageWidth，
+     * 上面两行就还原成原来的「一步缩放」，画框结果与改造前完全一致。
+     */
+    public static volatile int lastFullImageWidth = 0;
+    public static volatile int lastFullImageHeight = 0;
+    /**
+     * 区域识别：裁剪块在全屏图里的左上角偏移（像素）。
+     *
+     * 非区域识别恒为 0。语义是「加上它，裁剪图坐标就变成全屏坐标」。
+     */
+    public static volatile int lastRegionLeft = 0;
+    public static volatile int lastRegionTop = 0;
 
 
     /**
@@ -143,6 +169,24 @@ public class OCRService extends Service {
 
     /** 当前生效的截屏方式，供界面显示。 */
     public static volatile String captureMode = "none";
+
+    /**
+     * 无障碍截图当前是否可用（缓存值）。
+     *
+     * <p>插件配置界面（Activity）拿不到 Service 实例，只能读静态值。
+     * 由 {@link #refreshScreenCaptureFlag()} 统一回写，避免各处手写导致滞后。
+     */
+    public static volatile boolean screenCaptureA11yReady = false;
+
+    /**
+     * root 截屏当前是否可用（缓存值）。理由同上。
+     */
+    public static volatile boolean screenCaptureRootReady = false;
+
+    /**
+     * 投屏（MediaProjection）授权当前是否可用（缓存值）。理由同上。
+     */
+    public static volatile boolean screenCaptureProjectionReady = false;
 
     /** CPU 唤醒锁：仅在处理 OCR 请求期间持有，避免长时间待机耗电。 */
     private PowerManager.WakeLock cpuLock;
@@ -360,7 +404,7 @@ public class OCRService extends Service {
     }
 private static final String PREFS = "xsocr_prefs";
     private static final String KEY_TIER = "model_tier";
-    /** 「启用 OCR 服务」开关。默认 true —— 老用户升级后行为不变。 */
+    /** 「启用 OCR 服务」开关。默认 false —— 见下方默认值说明。 */
     private static final String KEY_ENABLED = "ocr_enabled";
     /**
      * 是否把本应用从「最近任务」列表里隐藏。
@@ -385,14 +429,18 @@ private static final String PREFS = "xsocr_prefs";
     // 服务是 START_STICKY，但 stopService 是明确的停止意图，
     // 系统不会把它再拉起来 —— 否则开关就成了摆设。
     //
-    // 【默认值为什么是 true】
-    // 这个开关是后加的。老用户升级后 SharedPreferences 里没有这个键，
-    // 若默认 false 会让他们的接口一夜之间全挂 —— 必须默认 true。
+    // 【默认值为什么是 false】
+    // 1.3 之前默认 true，是为了「老用户升级后行为不变」。但代价很明确：
+    // 只想用手势触发宏的人，第一次打开 App 就被塞进一个前台通知 +
+    // 几百 MB 的模型常驻内存，而他根本没打算用 OCR 接口。
+    // 现在首次安装默认关闭：用户点「开始识别」或在上方开关里启用时才拉起服务，
+    // 拉起来之后值就落盘，之后每次启动都按用户的选择走。
+    // 已经装过老版本的用户 prefs 里已有这个键，不受影响。
     /** OCR 服务当前是否启用。 */
     public static boolean isEnabled(Context c) {
         return c.getApplicationContext()
                 .getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getBoolean(KEY_ENABLED, true);
+                .getBoolean(KEY_ENABLED, false);
     }
 
     /**
@@ -600,6 +648,24 @@ private static final String PREFS = "xsocr_prefs";
     }
 
     /**
+     * 把三种方式的可用状态分别写进静态缓存字段。
+     *
+     * <p>插件配置界面是纯 Activity，拿不到 Service 实例，
+     * 只能读这些静态值来告诉用户「你选的这条现在能不能用」。
+     * 分成三个而不是一个总开关，是因为用户可能想指定 root，
+     * 而 root 不可用时「有别的路可用」对他毫无意义。
+     */
+    private void refreshCaptureModeFlags() {
+        try {
+            screenCaptureA11yReady = OcrAccessibilityService.isReady();
+            screenCaptureRootReady = rootCapture != null && rootCapture.isReady();
+            screenCaptureProjectionReady = screenCapture != null && screenCapture.isReady();
+        } catch (Throwable t) {
+            Log.w(TAG, "刷新截屏方式标志失败: " + t);
+        }
+    }
+
+    /**
      * 无障碍服务连接/断开时由 {@link OcrAccessibilityService} 回调。
      *
      * 【为什么需要它】无障碍服务由系统绑定，连接与断开都不经过本服务，
@@ -613,6 +679,9 @@ private static final String PREFS = "xsocr_prefs";
     static void onAccessibilityStateChanged(boolean connected) {
         if (connected) {
             screenCaptureReady = true;
+            // 无障碍这条路刚可用：同步插件配置界面要读的那个标志，
+            // 否则用户勾选完切回来，插件里还显示"不可用"。
+            screenCaptureA11yReady = true;
         }
     }
 
@@ -628,6 +697,7 @@ private static final String PREFS = "xsocr_prefs";
      */
     private void refreshScreenCaptureFlag() {
         screenCaptureReady = isScreenCaptureReady();
+        refreshCaptureModeFlags();
     }
 
     /**
@@ -637,42 +707,145 @@ private static final String PREFS = "xsocr_prefs";
      * 前两者都不需要「开启截屏授权」、也不会弹录屏框；
      * 无障碍还额外不需要 root，所以放在最前面。
      * 任一条路失败都继续往下试，不会因为某条路临时失效就整体不可用。
+     *
+     * <p>【想要"只用某一条、失败就报错"请用 {@link #captureByMode}】
+     * 本方法是「自动挑一条能用的」，适合界面上的默认行为。
+     * 调用方如果明确指定了方式（插件的「截屏方式」选项），
+     * 就不能用这个方法 —— 否则用户选了「root」而 root 恰好不可用时，
+     * 会静默落到无障碍或投屏，拿到的图和预期不符却毫无提示。
      */
     public synchronized Bitmap captureScreen() throws Exception {
-        // ① 无障碍截图
-        OcrAccessibilityService a11y = OcrAccessibilityService.get();
-        if (a11y != null && a11y.canTakeScreenshot()) {
-            try {
-                Bitmap bmp = a11y.capture();
-                if (bmp != null) {
-                    captureMode = "accessibility";
-                    return bmp;
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "无障碍截图失败，尝试退回其它方式: " + t);
-            }
+        return captureByMode(CAPTURE_AUTO);
+    }
+
+    /** 截屏方式：自动（按序回退）。 */
+    public static final String CAPTURE_AUTO = "auto";
+    /** 截屏方式：只用无障碍截图。 */
+    public static final String CAPTURE_ACCESSIBILITY = "accessibility";
+    /** 截屏方式：只用 root screencap。 */
+    public static final String CAPTURE_ROOT = "root";
+    /** 截屏方式：只用 MediaProjection（投屏授权）。 */
+    public static final String CAPTURE_PROJECTION = "projection";
+
+    /**
+     * 这条方式当前可不可用（不真的截，只看条件）。
+     *
+     * <p>插件的「截屏方式」下拉要用它给出准确的提示：
+     * 用户选了 root 而设备没 root，应该当场告诉他要换一个，
+     * 而不是等到宏跑起来才失败。
+     */
+    public boolean isCaptureModeReady(String mode) {
+        if (mode == null) {
+            return false;
         }
-        // ② root 截屏
-        if (rootCapture != null && rootCapture.isReady()) {
-            try {
-                Bitmap bmp = rootCapture.capture();
-                if (bmp != null) {
-                    captureMode = "root";
-                    return bmp;
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "root 截屏失败，尝试退回 MediaProjection: " + t);
-            }
+        if (CAPTURE_ACCESSIBILITY.equals(mode)) {
+            return OcrAccessibilityService.isReady();
         }
-        // ② MediaProjection
-        if (screenCapture != null && screenCapture.isReady()) {
+        if (CAPTURE_ROOT.equals(mode)) {
+            return rootCapture != null && rootCapture.isReady();
+        }
+        if (CAPTURE_PROJECTION.equals(mode)) {
+            return screenCapture != null && screenCapture.isReady();
+        }
+        return false;
+    }
+
+    /**
+     * 按**指定方式**截屏，不做跨方式回退。
+     *
+     * <p>【为什么不回退】调用方明确要求「用 root」，那就是要 root 的那张图：
+     * 无障碍截图在部分机型上会带上系统弹出的提示、投屏在某些播放类应用上
+     * 是黑屏。悄悄换成另一种方式，结果会莫名其妙地不同，而调用方
+     * 完全不知道自己拿到的是另一条路的产物。
+     * 所以这里失败就抛异常，把「为什么不成功」明确带上去。
+     *
+     * @param mode {@link #CAPTURE_AUTO} 或三种具体方式之一
+     * @throws Exception 指定方式不可用、或截取失败
+     */
+    public synchronized Bitmap captureByMode(String mode) throws Exception {
+        String want = (mode == null || mode.length() == 0) ? CAPTURE_AUTO : mode;
+
+        if (CAPTURE_AUTO.equals(want)) {
+            // ---- 原来那套按序回退 ----
+            OcrAccessibilityService a11y = OcrAccessibilityService.get();
+            if (a11y != null && a11y.canTakeScreenshot()) {
+                try {
+                    Bitmap bmp = a11y.capture();
+                    if (bmp != null) {
+                        captureMode = "accessibility";
+                        return bmp;
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "无障碍截图失败，尝试退回其它方式: " + t);
+                }
+            }
+            if (rootCapture != null && rootCapture.isReady()) {
+                try {
+                    Bitmap bmp = rootCapture.capture();
+                    if (bmp != null) {
+                        captureMode = "root";
+                        return bmp;
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "root 截屏失败，尝试退回 MediaProjection: " + t);
+                }
+            }
+            if (screenCapture != null && screenCapture.isReady()) {
+                Bitmap bmp = screenCapture.capture();
+                captureMode = "mediaprojection";
+                return bmp;
+            }
+            throw new IllegalStateException(
+                    "无可用截屏方式：无障碍截图未开启、没有 root，"
+                            + "也还没在 App 内点「开启截屏授权」");
+        }
+
+        // ---- 指定方式：只走这一条 ----
+        if (CAPTURE_ACCESSIBILITY.equals(want)) {
+            OcrAccessibilityService a11y = OcrAccessibilityService.get();
+            if (a11y == null || !a11y.canTakeScreenshot()) {
+                throw new IllegalStateException(
+                        "指定用「无障碍截图」，但它现在不可用："
+                                + "请打开 Grace →「文字识别」→「无障碍截图」，"
+                                + "在系统设置里勾选「Grace 截图」一次（需 Android 11+）");
+            }
+            Bitmap bmp = a11y.capture();
+            if (bmp == null) {
+                throw new IllegalStateException("无障碍截图返回了空图");
+            }
+            captureMode = "accessibility";
+            return bmp;
+        }
+
+        if (CAPTURE_ROOT.equals(want)) {
+            if (rootCapture == null || !rootCapture.isReady()) {
+                throw new IllegalStateException(
+                        "指定用「Root 截屏」，但这台设备现在没有可用的 root："
+                                + "请确认已授权 root，或换成其它截屏方式");
+            }
+            Bitmap bmp = rootCapture.capture();
+            if (bmp == null) {
+                throw new IllegalStateException("root screencap 返回了空图");
+            }
+            captureMode = "root";
+            return bmp;
+        }
+
+        if (CAPTURE_PROJECTION.equals(want)) {
+            if (screenCapture == null || !screenCapture.isReady()) {
+                throw new IllegalStateException(
+                        "指定用「投屏授权」，但授权已失效（服务重启后需要重新授权）："
+                                + "请打开 Grace 点一次「开启截屏授权」，或换成其它截屏方式");
+            }
             Bitmap bmp = screenCapture.capture();
+            if (bmp == null) {
+                throw new IllegalStateException("投屏截取返回了空图");
+            }
             captureMode = "mediaprojection";
             return bmp;
         }
-        throw new IllegalStateException(
-                "无可用截屏方式：无障碍截图未开启、没有 root，"
-                        + "也还没在 App 内点「开启截屏授权」");
+
+        throw new IllegalArgumentException("未知的截屏方式: " + want);
     }
 
     /**
@@ -1022,7 +1195,7 @@ private static final String PREFS = "xsocr_prefs";
 
                 if (nm.getNotificationChannel(CHANNEL_ID) == null) {
                     NotificationChannel channel = new NotificationChannel(
-                            CHANNEL_ID, "小孙OCR 服务", NotificationManager.IMPORTANCE_LOW);
+                            CHANNEL_ID, "Grace 服务", NotificationManager.IMPORTANCE_LOW);
                     channel.setShowBadge(false);
                     nm.createNotificationChannel(channel);
                 }
@@ -1036,7 +1209,7 @@ private static final String PREFS = "xsocr_prefs";
             builder = new Notification.Builder(this);
         }
         return builder
-                .setContentTitle("小孙OCR 服务端运行中")
+                .setContentTitle("Grace 服务端运行中")
                 // 端口取自 HTTP_PORT（唯一来源），避免"通知写 A、实际监听 B"
                 .setContentText("监听地址: 127.0.0.1:" + HTTP_PORT)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)

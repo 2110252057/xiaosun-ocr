@@ -6,7 +6,6 @@ import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.text.InputType;
-import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
@@ -21,6 +20,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.List;
+
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
  * Locale/Tasker 插件的「配置界面」。
@@ -68,8 +70,12 @@ public class PluginEditActivity extends Activity {
      *   宿主的触发器列表里挑错。详见 PluginContract 里的协议说明。
      */
     private String pluginMode = PluginContract.MODE_SETTING;
-    /** 图片路径组的容器引用，模式切换时要用它整体隐藏。 */
-    private LinearLayout imageGroup;
+    /** 截屏方式容器（选「指定图片路径」时整体隐藏）。 */
+    private LinearLayout captureGroup;
+    /** 截屏方式下拉：无障碍 / Root / 投屏授权。 */
+    private Spinner captureSpinner;
+    /** 截屏方式下方的说明行，实时反映该方式当前可不可用。 */
+    private TextView captureHint;
     /** 根容器，供 markActionOnly 把控件同时登记进「动作专用」列表。 */
     private LinearLayout rootView;
     /** 把控件加进根容器，并登记为「只有动作模式才显示」。 */
@@ -99,9 +105,52 @@ public class PluginEditActivity extends Activity {
     private java.util.List<View> actionOnlyViews = new java.util.ArrayList<>();
 private static final String[] SOURCES = {"截取当前屏幕", "指定图片路径"};
     private static final String[] TIERS = {"tiny · 轻量（快）", "small · 高精度", "rapid · ML Kit（最快）"};
-    private static final String[] TYPES = {"纯文本", "含坐标（Json）"};
+    /**
+     * 输出格式三档，与 OCR 页的下拉、接口的 {@code type} 1/2/3 一一对应。
+     *
+     * 原来只有「纯文本 / 含坐标（Json）」两档。加「矩形」是因为宏里
+     * 常见的下一步是「点这行字」，而只给 x,y 只能点到字块的左上角 ——
+     * 那是字的边缘，很容易点空。有了 w,h 才能算中心点。
+     */
+    private static final String[] TYPES = {"文本", "坐标", "矩形"};
     /** 匹配方式：索引对应 MODE_CONTAINS / MODE_EXACT。 */
     private static final String[] MATCH_MODES = {"包含文本", "匹配文本（完全一致）"};
+
+    /**
+     * 截屏方式。
+     *
+     * <p>【为什么不给"自动"这一项】这是用户明确要求的：三种方式各选一种，
+     * 而不是让服务端轮着试。理由见 {@link PluginContract#KEY_CAPTURE}。
+     * 数组索引与 CAPTURE_KEYS 一一对应。
+     */
+    private static final String[] CAPTURE_MODES = {"无障碍截图", "Root 截屏", "投屏授权"};
+    /** 与 CAPTURE_MODES 对应的接口取值，下标必须严格对齐。 */
+    private static final String[] CAPTURE_KEYS = {
+            OCRService.CAPTURE_ACCESSIBILITY,
+            OCRService.CAPTURE_ROOT,
+            OCRService.CAPTURE_PROJECTION,
+    };
+
+    /**
+     * 识别范围：整屏 / 只用一块区域。
+     *
+     * <p>【2.15 起区域也能在插件里框了】上一版只给了「整屏 / 用 App 里已设的那块」，
+     * 因为怕"插件存一份、App 存一份"互相覆盖。现在的做法是：
+     * 插件里框的区域**存进同一份 OcrRegion**，框的时候直接把 App 里已有的那块
+     * 显示出来作为起点，所以两边看到的永远是同一块，不存在两份数据。
+     * 用户也可以点「清除」把它清掉，App 那边立刻同步。
+     */
+    private static final String[] REGION_MODES = {"整屏", "只识别一块区域"};
+    /** 区域下拉的控件引用，保存与回填都要用。 */
+    private Spinner regionSpinner;
+    /** 区域下拉下方的说明行，随选择变化实时改文案。 */
+    private TextView regionHint;
+    /** 「框选区域…」按钮：截一张当前屏幕，跳到全屏框选页。 */
+    private Button regionPickBtn;
+    /** 「清除区域」按钮：把已存的那块删掉，回到整屏。 */
+    private Button regionClearBtn;
+    /** 请求码：从 RegionSelectActivity 拿回框选结果。 */
+    private static final int REQ_PICK_REGION = 2001;
     /**
      * 手势事件「监听方向」下拉项。
      *
@@ -138,18 +187,19 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
     private static final int GS_MODE_DIRECT = 1;
     private static final int GS_MODE_MENU = 2;
 
-    private int C_TEXT, C_SUB, C_HINT, C_BRAND, C_DIVIDER, C_SURFACE;
+
+    @Override
+    protected void onDestroy() {
+        // 悬浮球是系统级窗口，不随 Activity 消失。配置界面被关掉（宿主取消、
+        // 用户返回）时它必须一起撤掉，否则会有一颗"框"永远浮在别人屏幕上。
+        // 这里不调 RegionPickDot.hide() 之外的东西：hide() 本身幂等。
+        RegionPickDot.hide();
+        super.onDestroy();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        C_TEXT = 0xFF1A1D26;
-        C_SUB = 0xFF6B7280;
-        C_HINT = 0xFF9CA3AF;
-        C_BRAND = 0xFF4F6BED;
-        C_DIVIDER = 0xFFEAECF2;
-        C_SURFACE = 0xFFFFFFFF;
 
         Bundle old = null;
         Intent it = getIntent();
@@ -159,7 +209,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         //   其它（含 EDIT_SETTING / action 为空）→ 当作动作处理
         //
         // ★ 这里不再处理 EDIT_CONDITION：条件身份已从 Manifest 撤除，
-        //   插件在宿主的触发器列表里只有「小孙OCR · 边缘滑动事件」一个入口。
+        //   插件在宿主的触发器列表里只有「Grace · 边缘滑动事件」一个入口。
         if (PluginContract.ACTION_EDIT_EVENT.equals(action)) {
             pluginMode = PluginContract.MODE_EVENT;
         } else {
@@ -185,10 +235,10 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         LinearLayout root = new LinearLayout(this);
         rootView = root;
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(16), dp(20), dp(16));
+        root.setPadding(dp(this, 20), dp(this, 16), dp(this, 20), dp(this, 16));
         TextView title = new TextView(this);
         // 标题跟着模式走：用户点的是「触发器」，界面却说「插件配置」会很迷惑。
-        title.setText(triggerMode ? "小孙OCR · 手势触发器" : "小孙OCR · 插件配置");
+        title.setText(triggerMode ? "Grace · 手势触发器" : "Grace · 插件配置");
         title.setTextSize(17);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         title.setTextColor(C_TEXT);
@@ -199,11 +249,11 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
             sub.setTextSize(11.5f);
             sub.setTextColor(C_HINT);
             sub.setLineSpacing(0f, 1.35f);
-            root.addView(sub, wideTop(6));
+            root.addView(sub, wideTop(this, 6));
         }
 
         // ---------- 图片来源 ----------
-        markActionOnly(sectionLabel("图片来源"), wideTop(16));
+        markActionOnly(sectionLabel("图片来源"), wideTop(this, 16));
         sourceSpinner = new Spinner(this);
         sourceSpinner.setAdapter(spinnerAdapter(SOURCES));
         markActionOnly(sourceSpinner, wide());
@@ -211,7 +261,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         // 路径组（默认隐藏）
         pathGroup = new LinearLayout(this);
         pathGroup.setOrientation(LinearLayout.VERTICAL);
-        pathGroup.addView(sectionLabel("图片路径"), wideTop(16));
+        pathGroup.addView(sectionLabel("图片路径"), wideTop(this, 16));
 
         pathInput = new EditText(this);
         pathInput.setHint("/sdcard/test.png");
@@ -219,7 +269,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         pathInput.setSingleLine(true);
         pathInput.setInputType(InputType.TYPE_CLASS_TEXT);
         pathInput.setBackground(roundedBorder());
-        pathInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        pathInput.setPadding(dp(this, 12), dp(this, 10), dp(this, 12), dp(this, 10));
         pathGroup.addView(pathInput, wide());
 
         TextView pathHint = new TextView(this);
@@ -227,7 +277,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         pathHint.setTextSize(11);
         pathHint.setTextColor(C_HINT);
         LinearLayout.LayoutParams hintLp = wide();
-        hintLp.topMargin = dp(4);
+        hintLp.topMargin = dp(this, 4);
         pathGroup.addView(pathHint, hintLp);
 
         pathGroup.setVisibility(View.GONE);
@@ -243,9 +293,47 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
                 if (!PluginContract.MODE_SETTING.equals(pluginMode)) {
                     // 触发器模式下这整块都该藏着，别让它跳出来
                     pathGroup.setVisibility(View.GONE);
+                    if (captureGroup != null) captureGroup.setVisibility(View.GONE);
                     return;
                 }
                 pathGroup.setVisibility(pos == 1 ? View.VISIBLE : View.GONE);
+                // 截屏方式只对「截取当前屏幕」有意义，选路径时一起藏起来
+                if (captureGroup != null) {
+                    captureGroup.setVisibility(pos == 1 ? View.GONE : View.VISIBLE);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+
+        // ---------- 截屏方式 ----------
+        // 与「图片来源」一起显隐：选「指定图片路径」时不该出现。
+        // 自己建一个容器，而不是用废弃的 imageGroup（那个字段只有声明、从未初始化）。
+        captureGroup = new LinearLayout(this);
+        captureGroup.setOrientation(LinearLayout.VERTICAL);
+        captureGroup.addView(sectionLabel("截屏方式"), wideTop(this, 16));
+
+        captureSpinner = new Spinner(this);
+        captureSpinner.setAdapter(spinnerAdapter(CAPTURE_MODES));
+        captureGroup.addView(captureSpinner, wide());
+
+        captureHint = new TextView(this);
+        captureHint.setTextSize(11);
+        captureHint.setTextColor(C_HINT);
+        captureHint.setLineSpacing(0f, 1.3f);
+        LinearLayout.LayoutParams capHintLp = wide();
+        capHintLp.topMargin = dp(this, 4);
+        captureGroup.addView(captureHint, capHintLp);
+
+        // 显隐由「图片来源」下拉框掌握，所以用 addToRoot（同 pathGroup 的理由）。
+        addToRoot(captureGroup, wide());
+
+        captureSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                refreshCaptureHint();
             }
 
             @Override
@@ -254,15 +342,71 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         });
 
         // ---------- 模型档位 ----------
-        markActionOnly(sectionLabel("模型档位"), wideTop(16));
+        markActionOnly(sectionLabel("模型档位"), wideTop(this, 16));
         tierSpinner = new Spinner(this);
         tierSpinner.setAdapter(spinnerAdapter(TIERS));
         markActionOnly(tierSpinner, wide());
-        // ---------- 输出格式 ----------
-        markActionOnly(sectionLabel("输出格式"), wideTop(16));
+// ---------- 输出格式 ----------
+        markActionOnly(sectionLabel("输出格式"), wideTop(this, 16));
         typeSpinner = new Spinner(this);
         typeSpinner.setAdapter(spinnerAdapter(TYPES));
         markActionOnly(typeSpinner, wide());
+
+        // ---------- 识别区域 ----------
+        markActionOnly(sectionLabel("识别区域"), wideTop(this, 16));
+        regionSpinner = new Spinner(this);
+        regionSpinner.setAdapter(spinnerAdapter(REGION_MODES));
+        markActionOnly(regionSpinner, wide());
+
+        regionHint = new TextView(this);
+        regionHint.setTextSize(11);
+        regionHint.setTextColor(C_HINT);
+        regionHint.setLineSpacing(0f, 1.3f);
+        LinearLayout.LayoutParams regionHintLp = wide();
+        regionHintLp.topMargin = dp(this, 4);
+        markActionOnly(regionHint, regionHintLp);
+
+        regionSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                refreshRegionHint();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+
+        // 区域操作行：框选 / 清除。
+        // 这里直接改的是 OcrRegion（与 App 共用同一份），不存在第二份数据。
+        LinearLayout regionBtnRow = new LinearLayout(this);
+        regionBtnRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rbrLp = wide();
+        rbrLp.topMargin = dp(this, 8);
+
+        regionPickBtn = new Button(this);
+        regionPickBtn.setText("框选区域…");
+        regionPickBtn.setTextSize(13);
+        regionPickBtn.setAllCaps(false);
+        LinearLayout.LayoutParams rpbLp = weight();
+        regionPickBtn.setLayoutParams(rpbLp);
+        regionPickBtn.setOnClickListener(v -> pickRegionForPlugin());
+        regionBtnRow.addView(regionPickBtn);
+
+        regionClearBtn = new Button(this);
+        regionClearBtn.setText("清除区域");
+        regionClearBtn.setTextSize(13);
+        regionClearBtn.setAllCaps(false);
+        regionClearBtn.setOnClickListener(v -> {
+            OcrRegion.clear(this);
+            refreshRegionHint();
+            Toast.makeText(this, "已清除区域，识别范围回到整屏",
+                    Toast.LENGTH_SHORT).show();
+        });
+        regionBtnRow.addView(regionClearBtn);
+
+        markActionOnly(regionBtnRow, rbrLp);
+        refreshRegionHint();
 
         joinNewline = new CheckBox(this);
         joinNewline.setText("多行结果用换行拼接");
@@ -270,7 +414,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         joinNewline.setTextColor(C_TEXT);
         joinNewline.setChecked(true);
         LinearLayout.LayoutParams cbLp = wide();
-        cbLp.topMargin = dp(10);
+        cbLp.topMargin = dp(this, 10);
         markActionOnly(joinNewline, cbLp);
         // ---------- 手势事件配置（只有触发器模式才显示） ----------
         //
@@ -279,7 +423,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         // 跟上面那些「识别什么内容」无关，所以整块隐藏起来。
         gestureGroup = new LinearLayout(this);
         gestureGroup.setOrientation(LinearLayout.VERTICAL);
-        gestureGroup.addView(sectionLabel("监听方向"), wideTop(16));
+        gestureGroup.addView(sectionLabel("监听方向"), wideTop(this, 16));
         gsDirSpinner = new Spinner(this);
         gsDirSpinner.setAdapter(spinnerAdapter(GS_DIR_ITEMS));
         gestureGroup.addView(gsDirSpinner, wide());
@@ -289,14 +433,14 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         gsDirHint.setTextSize(11);
         gsDirHint.setTextColor(C_HINT);
         gsDirHint.setLineSpacing(0f, 1.3f);
-        gestureGroup.addView(gsDirHint, wideTop(4));
+        gestureGroup.addView(gsDirHint, wideTop(this, 4));
 
         // ---------- 滑过之后干什么 ----------
         //
         // 这个下拉改的是**手柄上该方向的设置**，不是仅存进宏的私有值。
         // 原因见 GS_MODES 的注释：菜单是在插件被查询之前弹的，
         // 服务必须能在滑动当场读到「这个方向要不要弹菜单」。
-        gestureGroup.addView(sectionLabel("滑过之后"), wideTop(14));
+        gestureGroup.addView(sectionLabel("滑过之后"), wideTop(this, 14));
         gsModeSpinner = new Spinner(this);
         gsModeSpinner.setAdapter(spinnerAdapter(GS_MODES));
         gestureGroup.addView(gsModeSpinner, wide());
@@ -304,7 +448,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         gsModeHint.setTextSize(11);
         gsModeHint.setTextColor(C_HINT);
         gsModeHint.setLineSpacing(0f, 1.3f);
-        gestureGroup.addView(gsModeHint, wideTop(4));
+        gestureGroup.addView(gsModeHint, wideTop(this, 4));
         gsModeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
@@ -334,14 +478,14 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         gsStrict.setTextSize(13);
         gsStrict.setTextColor(C_TEXT);
         gsStrict.setChecked(true);
-        gestureGroup.addView(gsStrict, wideTop(10));
+        gestureGroup.addView(gsStrict, wideTop(this, 10));
         TextView gsStrictHint = new TextView(this);
         gsStrictHint.setText("开启后只认 60 秒内由本应用签发的滑动事件，"
                 + "其它 App 伪造的同名广播会被忽略。");
         gsStrictHint.setTextSize(11);
         gsStrictHint.setTextColor(C_HINT);
         gsStrictHint.setLineSpacing(0f, 1.3f);
-        gestureGroup.addView(gsStrictHint, wideTop(2));
+        gestureGroup.addView(gsStrictHint, wideTop(this, 2));
         gestureGroup.setVisibility(View.GONE);
         root.addView(gestureGroup, wide());
 
@@ -351,20 +495,20 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         // 整块放进 matchGroup：触发器模式下这些跟「什么手势算触发」无关。
         matchGroup = new LinearLayout(this);
         matchGroup.setOrientation(LinearLayout.VERTICAL);
-        matchGroup.addView(sectionLabel("指定文本（可选）"), wideTop(16));
+        matchGroup.addView(sectionLabel("指定文本（可选）"), wideTop(this, 16));
         matchInput = new EditText(this);
         matchInput.setHint("例如：确定");
         matchInput.setTextSize(13);
         matchInput.setSingleLine(true);
         matchInput.setInputType(InputType.TYPE_CLASS_TEXT);
         matchInput.setBackground(roundedBorder());
-        matchInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        matchInput.setPadding(dp(this, 12), dp(this, 10), dp(this, 12), dp(this, 10));
         matchGroup.addView(matchInput, wide());
         // 匹配方式：包含 / 完全一致
         matchModeSpinner = new Spinner(this);
         matchModeSpinner.setAdapter(spinnerAdapter(MATCH_MODES));
         LinearLayout.LayoutParams modeLp = wide();
-        modeLp.topMargin = dp(8);
+        modeLp.topMargin = dp(this, 8);
         matchGroup.addView(matchModeSpinner, modeLp);
         TextView matchHint = new TextView(this);
         matchHint.setText("「包含文本」：含这几个字就算找到。\n"
@@ -373,7 +517,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         matchHint.setTextSize(11);
         matchHint.setTextColor(C_HINT);
         LinearLayout.LayoutParams matchHintLp = wide();
-        matchHintLp.topMargin = dp(4);
+        matchHintLp.topMargin = dp(this, 4);
         matchGroup.addView(matchHint, matchHintLp);
         markActionOnly(matchGroup, wide());
 
@@ -381,7 +525,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         LinearLayout btns = new LinearLayout(this);
         btns.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams btnRowLp = wide();
-        btnRowLp.topMargin = dp(22);
+        btnRowLp.topMargin = dp(this, 22);
         root.addView(btns, btnRowLp);
 
         Button cancel = new Button(this);
@@ -400,7 +544,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         ok.setBackground(primaryBg());
         ok.setOnClickListener(v -> saveConfig());
         LinearLayout.LayoutParams okLp = weight();
-        okLp.leftMargin = dp(10);
+        okLp.leftMargin = dp(this, 10);
         btns.addView(ok, okLp);
 
         // ---------- 变量说明 ----------
@@ -411,7 +555,7 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         note.setTextColor(C_SUB);
         note.setLineSpacing(0f, 1.35f);
         LinearLayout.LayoutParams noteLp = wide();
-        noteLp.topMargin = dp(20);
+        noteLp.topMargin = dp(this, 20);
         root.addView(note, noteLp);
 
         // ---------- 外层滚动 ----------
@@ -469,15 +613,21 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
             gestureGroup.setVisibility(triggerMode ? View.VISIBLE : View.GONE);
         }
 
-        // pathGroup 不归 actionOnlyViews 管（它的显隐由「图片来源」下拉框决定），
-        // 但触发器模式下要强制藏起来 —— 那边根本没有"图片来源"这个概念。
-        if (pathGroup != null) {
-            if (triggerMode) {
-                pathGroup.setVisibility(View.GONE);
-            } else {
-                boolean byPath = sourceSpinner != null
-                        && sourceSpinner.getSelectedItemPosition() == 1;
-                pathGroup.setVisibility(byPath ? View.VISIBLE : View.GONE);
+        // pathGroup / captureGroup 不归 actionOnlyViews 管（它们的显隐由「图片来源」
+        // 下拉框决定），但触发器模式下要强制藏起来 —— 那边根本没有"图片来源"这个概念。
+        // 两者在这里一起同步：只按来源算一次，避免两个组出现"一个显示一个隐藏"。
+        if (pathGroup != null || captureGroup != null) {
+            boolean byPath = sourceSpinner != null
+                    && sourceSpinner.getSelectedItemPosition() == 1;
+            boolean settingMode = !triggerMode;
+            if (pathGroup != null) {
+                pathGroup.setVisibility(
+                        (settingMode && byPath) ? View.VISIBLE : View.GONE);
+            }
+            if (captureGroup != null) {
+                // 截屏方式只对「截取当前屏幕」有意义。
+                captureGroup.setVisibility(
+                        (settingMode && !byPath) ? View.VISIBLE : View.GONE);
             }
         }
 
@@ -514,8 +664,42 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         if (tier < 0) tier = 0;
         tierSpinner.setSelection(Math.min(tier, TIERS.length - 1), false);
 
-        typeSpinner.setSelection(b.getInt(PluginContract.KEY_TYPE, 1) >= 2 ? 1 : 0, false);
+        // type 1/2/3 → 索引 0/1/2。旧配置里可能是 1 或 2，直接减一即可；
+        // 越界值（0 / 4 / 脏数据）夹到合法范围，不让下拉显示空白。
+        int savedType = b.getInt(PluginContract.KEY_TYPE, 1);
+        typeSpinner.setSelection(Math.max(0, Math.min(savedType - 1, TYPES.length - 1)), false);
         joinNewline.setChecked(b.getBoolean(PluginContract.KEY_JOIN_NEWLINE, true));
+
+        // 识别区域回填。旧配置里没有这个键 → getInt 给 0（整屏），
+        // 与升级前的行为一致（那时插件根本没有区域支持）。
+        if (regionSpinner != null) {
+            regionSpinner.setSelection(
+                    b.getInt(PluginContract.KEY_USE_REGION, 0) >= 1 ? 1 : 0, false);
+            refreshRegionHint();
+        }
+
+        // 截屏方式回填。旧配置没有这个键 → 默认无障碍（免 root、免授权的首选）。
+        if (captureSpinner != null) {
+            String savedCap = b.getString(PluginContract.KEY_CAPTURE,
+                    OCRService.CAPTURE_ACCESSIBILITY);
+            int idx = 0;
+            for (int i = 0; i < CAPTURE_KEYS.length; i++) {
+                if (CAPTURE_KEYS[i].equals(savedCap)) {
+                    idx = i;
+                    break;
+                }
+            }
+            captureSpinner.setSelection(idx, false);
+            refreshCaptureHint();
+        }
+        // 截屏方式的显隐跟着「图片来源」走（applyOld 上面已设过 sourceSpinner），
+        // 但 setSelection(...,false) 不触发监听，所以这里手动同步一次。
+        if (captureGroup != null) {
+            boolean byPath = PluginContract.SOURCE_PATH.equals(src);
+            captureGroup.setVisibility(
+                    (!byPath && PluginContract.MODE_SETTING.equals(pluginMode))
+                            ? View.VISIBLE : View.GONE);
+        }
         matchInput.setText(b.getString(PluginContract.KEY_MATCH_TEXT, ""));
         int mode = b.getInt(PluginContract.KEY_MATCH_MODE, PluginContract.MODE_CONTAINS);
         matchModeSpinner.setSelection(
@@ -765,9 +949,35 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
             int tier = tierSpinner.getSelectedItemPosition();
             cfg.putString(PluginContract.KEY_TIER, OCRService.tierName(tier));
 
-            int type = typeSpinner.getSelectedItemPosition() == 1 ? 2 : 1;
+            // 下拉索引 0/1/2 → type 1/2/3。
+            // 不再写成「== 1 ? 2 : 1」：那样选「矩形」会掉回 1，
+            // 用户选了却拿到没坐标的结果。
+            int type = typeSpinner.getSelectedItemPosition() + 1;
+            if (type < 1 || type > 3) type = 1;
             cfg.putInt(PluginContract.KEY_TYPE, type);
             cfg.putBoolean(PluginContract.KEY_JOIN_NEWLINE, joinNewline.isChecked());
+
+            // 截屏方式：只在「截取当前屏幕」时有意义，但一并存下 ——
+            // 用户可能先配了截屏、后来又切成路径，之后再切回来时选择还在。
+            int capPos = captureSpinner == null ? 0 : captureSpinner.getSelectedItemPosition();
+            if (capPos < 0 || capPos >= CAPTURE_KEYS.length) capPos = 0;
+            cfg.putString(PluginContract.KEY_CAPTURE, CAPTURE_KEYS[capPos]);
+
+            // 识别区域：0=整屏 1=只识别一块区域。
+            int useRegion = regionSpinner != null
+                    && regionSpinner.getSelectedItemPosition() > 0 ? 1 : 0;
+            cfg.putInt(PluginContract.KEY_USE_REGION, useRegion);
+            if (useRegion == 1) {
+                // 区域只有一份（OcrRegion），这里存的是"用不用"，
+                // 具体数值运行时再读 —— 这样在 App 里改了区域，宏也跟着变。
+                if (OcrRegion.load(this) == null) {
+                    Toast.makeText(this,
+                            "还没有框过区域：请点「框选区域…」先框一块",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                cfg.putString(PluginContract.KEY_REGION, "");
+            }
 
             // 指定文本（可选）：留空表示不做匹配查询
             String matchText = matchInput.getText() == null
@@ -781,9 +991,10 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
 
             String modeName = matchMode == PluginContract.MODE_EXACT ? "匹配" : "包含";
 
-            blurb = (srcPos == 1 ? "路径" : "截屏")
+            blurb = (srcPos == 1 ? "路径" : ("截屏·" + CAPTURE_MODES[capPos]))
                     + " · " + OCRService.tierName(tier)
-                    + " · " + (type == 1 ? "纯文本" : "含坐标")
+                    + " · " + TYPES[Math.max(0, Math.min(type - 1, TYPES.length - 1))]
+                    + (useRegion == 1 ? " · 区域" : "")
                     + (matchText.isEmpty() ? "" : " · " + modeName + "「" + matchText + "」");
         }
 
@@ -835,6 +1046,272 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
         return a;
     }
 
+    /**
+     * 在插件里框选区域 —— 分两步，中间给用户切页面的机会。
+     *
+     * <p>【为什么需要两步】配置界面是宿主拉起来的普通页面。原来点按钮就
+     * **立刻**截图，可那一刻前台正是 Grace 自己的配置界面，截到的必然是这一页，
+     * 而用户想框的是别的 App 的页面 —— 底图永远不对。
+     * 所以改成：先摆一个悬浮球（{@link RegionPickDot}），用户切到目标页面
+     * 再点它，那时才截图并进入框选。
+     *
+     * <p>【为什么框选结果仍写同一份 OcrRegion】区域存在 OcrRegion 里，
+     * App 的「设区域…」与这里读写的是同一份数据。插件不另存 ——
+     * 否则用户在插件里框了、App 里还显示旧的，两边就会各说各话。
+     *
+     * <p>【为什么要走 /shot 而不是自己截】{@link RegionSelectActivity} 需要一张
+     * 截图才能铺满屏幕给人框。插件侧（Activity）自己调 captureScreen()
+     * 拿不到 Service 实例，所以借服务的 /shot。
+     */
+    private void pickRegionForPlugin() {
+        // 必须先确认服务在跑，否则点完球以后 /shot 会失败。
+        if (!OCRService.isRunning) {
+            Toast.makeText(this,
+                    "OCR 服务没在运行：请先打开 Grace 一次，或让宏跑一次把它拉起来",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        // 已经摆着一个球了：再点一次就当作撤掉，避免重复点击摆出多个。
+        if (RegionPickDot.isShowing()) {
+            RegionPickDot.hide();
+            Toast.makeText(this, "已收起悬浮球", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (!RegionPickDot.canShow(this)) {
+            Toast.makeText(this,
+                    "需要「显示在其他应用上层」权限才能摆悬浮球。\n"
+                            + "点「确定」去设置里给 Grace 勾上，回来再点一次「框选区域…」。",
+                    Toast.LENGTH_LONG).show();
+            RegionPickDot.requestPermission(this);
+            return;
+        }
+
+        boolean ok = RegionPickDot.show(this, new RegionPickDot.Callback() {
+            @Override
+            public void onTap() {
+                // 球已经撤掉了，这里只管去截图。
+                captureThenPick();
+            }
+
+            @Override
+            public void onCancel() {
+                runOnUiThread(() -> Toast.makeText(PluginEditActivity.this,
+                        "已取消框选", Toast.LENGTH_SHORT).show());
+            }
+        });
+
+        if (!ok) {
+            Toast.makeText(this,
+                    "悬浮球没摆出来：可能是权限刚被撤销，或系统拒绝了悬浮窗。\n"
+                            + "先去设置里确认「显示在其他应用上层」为允许。",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        Toast.makeText(this,
+                "悬浮球已就位：切到要识别的页面，点它即可框选；长按可取消。",
+                Toast.LENGTH_LONG).show();
+    }
+
+    /**
+     * 点了悬浮球之后：截图 → 跳全屏框选页。
+     *
+     * <p>【为什么要先等一下】悬浮球本身也是一扇窗口，刚撤掉时合成器可能
+     * 还没刷新完，立刻截图会把那颗蓝球一起拍进去，框选底图上莫名其妙多一个圆。
+     * 等两帧多一点（150ms）足够，又不会让用户觉得卡。
+     *
+     * <p>【为什么这里敢在后台 startActivity】点球那一刻，Grace 已经不在前台
+     * （用户切到目标 App 了），Android 10+ 默认禁止后台启动 Activity。
+     * 但系统对「持有 SYSTEM_ALERT_WINDOW 的应用」留了例外 ——
+     * 能画悬浮窗就等于用户已经授权它"能突然出现在屏幕上"，
+     * 启动界面也一并放行。这条路本身**就依赖那个权限**，
+     * 没权限连球都摆不出来（{@link #pickRegionForPlugin} 已经拦在前面）。
+     * 工程里 {@code ScreenCaptureRequestActivity} 能在后台弹授权框，
+     * 靠的也正是同一条例外。
+     */
+    private void captureThenPick() {
+        if (regionPickBtn != null) {
+            regionPickBtn.setEnabled(false);
+            regionPickBtn.setText("正在截屏…");
+        }
+        new Thread(() -> {
+            // 让悬浮窗真正从屏幕上消失再截。
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            String shotPath = null;
+            String err = null;
+            try {
+                String resp = Http.get("/shot", 15000);
+                if (resp == null || resp.length() == 0) {
+                    err = "截屏没有返回内容";
+                } else {
+                    org.json.JSONObject o = new org.json.JSONObject(resp);
+                    if (o.optInt("status", 0) != 200) {
+                        err = o.optString("data", "截屏失败");
+                    } else {
+                        org.json.JSONObject data = o.optJSONObject("data");
+                        shotPath = data == null ? null : data.optString("path", null);
+                        if (shotPath == null || shotPath.length() == 0) {
+                            err = "截屏接口没给路径";
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                err = t.getMessage() == null ? t.toString() : t.getMessage();
+            }
+            final String path = shotPath;
+            final String failMsg = err;
+            runOnUiThread(() -> {
+                if (regionPickBtn != null) {
+                    regionPickBtn.setEnabled(true);
+                    regionPickBtn.setText("框选区域…");
+                }
+                if (path == null) {
+                    Toast.makeText(this, "拿不到当前屏幕：" + failMsg
+                                    + "\n\n先在 Grace 里启用一种截屏方式再试。",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                // showCurrent=true：把已存的那块摆回屏幕上，用户能微调而不是重画。
+                // 用 openSelfSaving：本页在用户切到别的 App 之后才被拉起，
+                // 本 Activity 那时已在后台，可能被系统回收 —— 让框选页自己落盘。
+                try {
+                    RegionSelectActivity.openSelfSaving(this, path, true, REQ_PICK_REGION);
+                } catch (Throwable t) {
+                    // 极少数 ROM 连 SAW 例外都不认，后台启动直接抛异常。
+                    // 这里必须说清楚，否则用户只会看到"点了球什么都没发生"。
+                    Toast.makeText(this,
+                            "无法打开框选界面：" + (t.getMessage() == null ? t.toString() : t.getMessage())
+                                    + "\n请先切回 Grace，再点一次「框选区域…」。",
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+        }).start();
+    }
+
+    @Override
+    protected void onActivityResult(int reqCode, int resCode, Intent data) {
+        super.onActivityResult(reqCode, resCode, data);
+        if (reqCode != REQ_PICK_REGION) {
+            return;
+        }
+        // 无论走哪条路，先把可能还挂着的悬浮球撤掉 —— 用户从框选页回来时
+        // 球早该没了，兜一次底，避免极端情况下屏幕上留一颗球。
+        RegionPickDot.hide();
+        if (resCode != RESULT_OK || data == null) {
+            // 取消：不动已存区域。取消只该放弃这一次操作。
+            return;
+        }
+        float[] r = new float[]{
+                data.getFloatExtra(RegionSelectActivity.EXTRA_LEFT, 0f),
+                data.getFloatExtra(RegionSelectActivity.EXTRA_TOP, 0f),
+                data.getFloatExtra(RegionSelectActivity.EXTRA_RIGHT, 1f),
+                data.getFloatExtra(RegionSelectActivity.EXTRA_BOTTOM, 1f),
+        };
+        // 框选页若已经自己存过（EXTRA_SAVE_SELF），这里就不再存第二遍。
+        // 写两次虽然结果一样，但会多一次 prefs 写入，也让"到底谁负责存"变得含糊。
+        boolean savedByPicker = data.getBooleanExtra(
+                RegionSelectActivity.EXTRA_SAVE_SELF, false);
+        if (!savedByPicker) {
+            OcrRegion.save(this, r);
+        }
+        // 框完自动把范围切到「只识别一块区域」，省用户一次操作 ——
+        // 他刚框完，意图很明确。
+        if (regionSpinner != null) {
+            regionSpinner.setSelection(1, false);
+        }
+        refreshRegionHint();
+        Toast.makeText(this, "区域已保存（与 Grace 里共用同一块）",
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 刷新截屏方式说明行：告诉用户这条方式现在能不能用。
+     *
+     * <p>【为什么要在配置时就查】用户选了「Root 截屏」而设备没有 root，
+     * 如果这里不提示，要等宏跑起来才从 {@code %xsocr_error} 里看到。
+     * 在配置界面先亮出来，一眼就知道该换哪个。
+     */
+    private void refreshCaptureHint() {
+        if (captureHint == null || captureSpinner == null) {
+            return;
+        }
+        int pos = captureSpinner.getSelectedItemPosition();
+        if (pos < 0 || pos >= CAPTURE_KEYS.length) {
+            pos = 0;
+        }
+        String key = CAPTURE_KEYS[pos];
+
+        // 无障碍截图：看服务是否已连上无障碍
+        boolean ready = false;
+        String how;
+        if (OCRService.CAPTURE_ACCESSIBILITY.equals(key)) {
+            how = "免 root、免授权、不弹框，需 Android 11+ 并在系统设置里勾选「Grace 截图」。";
+            ready = OcrAccessibilityService.isReady();
+        } else if (OCRService.CAPTURE_ROOT.equals(key)) {
+            how = "走 su + screencap，需要设备已 root 且已授权。";
+            // 插件界面拿不到 Service 实例，只能读静态标志；
+            // 它由服务启动时探测、并在每次截屏后刷新，够用来给提示了。
+            ready = OCRService.screenCaptureRootReady;
+        } else {
+            how = "走系统录屏授权，服务重启后需要重新授权一次。";
+            ready = OCRService.screenCaptureProjectionReady;
+        }
+
+        if (ready) {
+            captureHint.setText(how + "\n当前状态：可用。");
+            captureHint.setTextColor(C_HINT);
+        } else {
+            captureHint.setText(how + "\n⚠ 当前状态：不可用，宏跑起来会报错。"
+                    + "请先在 Grace 里启用这条方式，或换成其它方式。");
+            captureHint.setTextColor(C_DANGER);
+        }
+    }
+
+    /**
+     * 刷新区域说明行，并控制「框选 / 清除」按钮的可用性。
+     */
+    private void refreshRegionHint() {
+        if (regionHint == null || regionSpinner == null) {
+            return;
+        }
+        boolean useRegion = regionSpinner.getSelectedItemPosition() > 0;
+        // 两个按钮只在「只识别一块区域」时才有意义
+        if (regionPickBtn != null) {
+            regionPickBtn.setEnabled(useRegion);
+            regionPickBtn.setAlpha(useRegion ? 1f : 0.4f);
+        }
+        if (regionClearBtn != null) {
+            OcrRegion cur = OcrRegion.load(this);
+            boolean canClear = useRegion && cur != null;
+            regionClearBtn.setEnabled(canClear);
+            regionClearBtn.setAlpha(canClear ? 1f : 0.4f);
+        }
+
+        if (!useRegion) {
+            regionHint.setText("整块屏幕都识别。要只识别屏幕里的一块，"
+                    + "选上一项然后点「框选区域…」。");
+            regionHint.setTextColor(C_HINT);
+            return;
+        }
+        OcrRegion r = OcrRegion.load(this);
+        if (r == null) {
+            regionHint.setText("还没有框过区域，点下面的「框选区域…」"
+                    + "直接在屏幕上拖一块（会先截一张当前屏幕给你框）。");
+            regionHint.setTextColor(C_HINT);
+            return;
+        }
+        regionHint.setText("当前区域：" + r.percentText()
+                + "（占全屏 " + Math.round(r.area() * 100) + "%）。"
+                + "点「框选区域…」可重框。");
+        regionHint.setTextColor(C_HINT);
+    }
+
     private TextView sectionLabel(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
@@ -844,39 +1321,24 @@ private static final String[] SOURCES = {"截取当前屏幕", "指定图片路�
     }
 
     /** 宽 MATCH_PARENT、高 WRAP_CONTENT —— 最常用。 */
-    private LinearLayout.LayoutParams wide() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    /** 同上，但带一个上边距（用于小节标题）。 */
-    private LinearLayout.LayoutParams wideTop(int topDp) {
-        LinearLayout.LayoutParams lp = wide();
-        lp.topMargin = dp(topDp);
-        return lp;
-    }
-
-    private LinearLayout.LayoutParams weight() {
-        return new LinearLayout.LayoutParams(0, dp(44), 1f);
+        /** 同上，但带一个上边距（用于小节标题）。 */
+        private LinearLayout.LayoutParams weight() {
+        return new LinearLayout.LayoutParams(0, dp(this, 44), 1f);
     }
 
     private GradientDrawable roundedBorder() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(C_SURFACE);
-        d.setCornerRadius(dp(10));
-        d.setStroke(dp(1), C_DIVIDER);
+        d.setCornerRadius(dp(this, 10));
+        d.setStroke(dp(this, 1), C_DIVIDER);
         return d;
     }
 
     private GradientDrawable primaryBg() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(C_BRAND);
-        d.setCornerRadius(dp(10));
+        d.setCornerRadius(dp(this, 10));
         return d;
     }
 
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
     }
-}

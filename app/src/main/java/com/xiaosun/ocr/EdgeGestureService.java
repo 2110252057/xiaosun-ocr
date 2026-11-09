@@ -57,6 +57,28 @@ extends Service {
     private static final int MOVE_SLOP_DP = 10;
     private static final long FLASH_MS = 170L;
     private static final int MAX_EXCLUDE_DP = 200;
+    /**
+     * 环形布局内环（第 1 圈）的最少项数。
+     *
+     * <p>内环少于 4 项时，中间那个圈小得连图标都快互相压住，
+     * 而外圈按「每圈翻倍」会一路膨胀（4→8→16……），
+     * 内圈和外圈的比例看起来就不成方圆了。所以兜底 4 项。
+     */
+    private static final int RING_MIN_INNER = 4;
+    /**
+     * 菜单悬停放大倍数。
+     *
+     * <p>菜单是「从手指底下长出来」的，手指拖动时正好盖住自己指着的那个图标，
+     * 只靠换颜色很难看清现在到底选的是哪一项。放大是最直接的「就是它」反馈。
+     *
+     * <p>只放大圆底和图标，下方说明文字保持原大小 —— 文字一放大就可能
+     * 压到相邻项（环形下还会顶到外环的图标），反而更难认。
+     *
+     * <p>1.3 倍实机试下来「知道变了、但不够扎眼」，尤其手指肚比较宽的时候，
+     * 放大那圈轮廓基本被手指压掉了。1.6 倍时直径多出六成，从指缝里
+     * 露出来的边明显可见，又还没到「和邻居糊成一坨」的程度。
+     */
+    private static final float MENU_HOVER_SCALE = 1.6f;
     private WindowManager wm;
     private final List<View> views = new ArrayList<View>();
     private BroadcastReceiver reloadReceiver;
@@ -910,6 +932,10 @@ extends Service {
         private float menuIconPx;
         private boolean menuShowText;
         private boolean menuArc;
+        /** 是否「环形」布局（以触发点为圆心绕一圈）。 */
+        private boolean menuRing;
+        /** 环形半径的手动设定值（dp）；0 = 按项数自动算。 */
+        private int menuRingRadiusDp;
         private float menuArcX;
         private float menuArcY;
         private float menuAnchorRawX;
@@ -1312,7 +1338,12 @@ extends Service {
             this.menuIconPx = this.dp(EdgeGesturePrefs.getMenuIconDp(this.getContext()));
             this.menuShowText = EdgeGesturePrefs.isMenuShowText(this.getContext());
             String layout = EdgeGesturePrefs.getMenuLayout(this.getContext());
-            this.menuArc = "arc".equals(layout);
+            // 「是圆形族布局」：斜排和环形都按圆心 + 半径的方式算命中
+            // （环形判定用「离哪个图标中心最近」，比矩形包含更符合直觉）。
+            this.menuArc = EdgeGesturePrefs.MENU_LAYOUT_ARC.equals(layout)
+                    || EdgeGesturePrefs.MENU_LAYOUT_RING.equals(layout);
+            this.menuRing = EdgeGesturePrefs.MENU_LAYOUT_RING.equals(layout);
+            this.menuRingRadiusDp = EdgeGesturePrefs.getMenuRingRadius(this.getContext());
             this.menuArcPerRing = EdgeGesturePrefs.getMenuArcPerRing(this.getContext());
             this.menuFillLight = EdgeGesturePrefs.isMenuLightBubble(this.getContext());
             this.menuBgColor = EdgeGesturePrefs.getMenuBgColor(this.getContext());
@@ -1505,16 +1536,190 @@ extends Service {
             float textH = this.menuShowText ? this.menuTextPx + this.menuTextGapPx : 0.0f;
             float cell = this.menuIconPx + textH;
             float pad = this.dp(12.0f);
-            this.layoutMenuLine(w, h, cell, gap, pad, n);
+            // 环形走自己那套排布：以触发点为圆心绕一圈；
+            // 斜排仍是原来的「45° 斜线 + 上方加排」。
+            if (this.menuRing) {
+                this.layoutMenuRing(w, h, cell, gap, pad, n);
+            } else {
+                this.layoutMenuLine(w, h, cell, gap, pad, n);
+            }
             AppLog.i(EdgeGestureService.TAG, "菜单布局: 画布=" + w + "x" + h
                     + " 窗口=" + this.getWidth() + "x" + this.getHeight()
                     + " 项数=" + n + " 格子=" + (int)cell + " 图标=" + (int)this.menuIconPx
                     + " 文字高=" + (int)textH + " 间距=" + (int)gap
                     + " 缩放后图标=" + (int)this.menuArcIconPx
-                    + " 圆心=(" + (int)this.menuCx + "," + (int)this.menuCy + ")");
+                    + " 圆心=(" + (int)this.menuCx + "," + (int)this.menuCy + ")"
+                    + " 布局=" + (this.menuRing ? "ring 半径=" + (int)this.menuRing0R : "arc"));
             if (w != this.getWidth() || h != this.getHeight()) {
                 Log.d((String)EdgeGestureService.TAG, (String)("LAYOUT \u7528\u5c4f\u5e55\u5c3a\u5bf8\u515c\u5e95: " + w + "x" + h + " \u7a97\u53e3=" + this.getWidth() + "x" + this.getHeight() + " \u56fe\u6807=" + (int)this.menuArcIconPx));
             }
+        }
+
+        /**
+          * 环形布局：以触发点为圆心，把项数**逐环**摆开。
+          *
+          * 【逐环分配：只设内环，其后翻倍】
+          * 「每排放几项」在环形下只表示**第 1 圈（最内圈）**摆几个，
+          * 之后每一圈都是前一圈的一倍：c0、2·c0、4·c0、8·c0……
+          * 例如内环 6 项 → 12、24、48……项数不够就提前结束。
+          * 内环下限 {@link #RING_MIN_INNER} 项 —— 少于这个数，第一圈太挤、
+          * 外面的圈又炸得太大，视觉上不成比例。
+          *
+          * 【几个必须守住的东西】
+         * 1. 圆心就是手指触发点（menuAnchorRaw 换算到本画布坐标），
+         *    这样菜单从手指底下「长出来」，视觉上和动作对应得上。
+         * 2. 内环半径有下界：既要让本环相邻两项不重叠（弦长约束
+         *    2·R·sin(π/c) ≥ 图标直径 + 间距），也不能小到图标压住圆心。
+         * 3. 外环半径 = 内环半径 + 一项的完整占位（图标 + 文字）+ 环间距。
+         *    文字统一在图标下方，所以占位高度必须按**整段文字**算，
+         *    否则外层图标会盖住内层的文字。
+         * 4. 整个外环必须塞进画布：超出就整体等比压缩图标，
+         *    再不行把圆心往内推 —— 贴着屏幕边缘触发时，
+         *    不推的话一半菜单会跑到屏幕外，用户根本点不到。
+         * 5. 某项单独一环（c == 1）时不能整除出错（sin(π) = 0），单独处理。
+         */
+        private void layoutMenuRing(int w, int h, float cell, float gap, float pad, int n) {
+            float iconPx = this.menuIconPx;
+            float textH = this.menuShowText ? this.menuTextPx + this.menuTextGapPx : 0.0f;
+            // 文字统一在图标下方 → 单项占位半径 = 图标半径 + 整段文字高度。
+            float itemR = iconPx / 2.0f + textH;
+
+            // ---- 逐环分配项数：只调「内环」，其后每环都是前一环的一倍 ----
+            // 「每排放几项」在环形下 = 第 1 圈（最内圈）摆几个，不是每圈都一样。
+            // 设内环 c0，则第 k 圈 = c0 * 2^k。面积按半径平方涨、周长按半径线性涨，
+            // 每圈翻一倍正好让各圈「单位周长上的密度」大致相当，看起来最规整。
+            // 这也是用户要的「第二个环数量是第一个环的一倍」。
+            int c0 = Math.max(RING_MIN_INNER, Math.max(1, this.menuArcPerRing));
+            int[] cnt = new int[n + 1];
+            int ringCount = 0;
+            int left = n;
+            int cap = c0;
+            while (left > 0 && ringCount <= n) {
+                int take = Math.min(cap, left);
+                cnt[ringCount] = take;
+                left -= take;
+                ringCount++;
+                // 下一圈容量翻倍。封顶防止 int 溢出（项数根本到不了这么大）。
+                if (cap > 1 << 20) {
+                    cap = 1 << 20;
+                } else {
+                    cap *= 2;
+                }
+            }
+            if (ringCount <= 0) {
+                return;
+            }
+
+            // ---- 逐环算半径 ----
+            float ringGap = this.dp(EdgeGesturePrefs.getMenuRingGap(this.getContext()));
+            float[] radii = new float[ringCount];
+            float prevR = 0.0f;
+            for (int r = 0; r < ringCount; ++r) {
+                float R;
+                // 本环项数多到一定程度就必须张得更开，否则同环相邻项会叠在一起
+                float minByChord = 0.0f;
+                if (cnt[r] > 1) {
+                    float sin = (float) Math.sin(Math.PI / cnt[r]);
+                    minByChord = sin > 0.001f
+                            ? (iconPx + gap) / (2.0f * sin) : (iconPx + gap);
+                }
+                if (r == 0) {
+                    R = cnt[0] <= 1
+                            ? itemR + this.dp(24.0f)
+                            : Math.max(minByChord, itemR + this.dp(10.0f));
+                } else {
+                    // 外环至少要往外挪出「一整个项位 + 环间距」
+                    R = prevR + iconPx + textH + ringGap;
+                    if (minByChord > R) {
+                        R = minByChord;
+                    }
+                }
+                radii[r] = R;
+                prevR = R;
+            }
+
+            // ---- 手动半径：把「最外环」缩放到用户指定值，各环比例不变 ----
+            if (this.menuRingRadiusDp > 0) {
+                float want = this.dp(this.menuRingRadiusDp);
+                float outerNow = radii[ringCount - 1];
+                if (outerNow > 0.001f) {
+                    float f = want / outerNow;
+                    for (int r = 0; r < ringCount; ++r) {
+                        radii[r] *= f;
+                    }
+                }
+            }
+
+            // ---- 缩放：最外环 + 图标 + 文字都得塞进画布 ----
+            float maxR = radii[ringCount - 1];
+            float availR = Math.min(w, h) / 2.0f - pad;
+            float outerR = maxR + itemR;
+            float scale = 1.0f;
+            if (outerR > availR && outerR > 0.0f) {
+                scale = Math.max(0.35f, availR / outerR);
+            }
+            float k = scale;
+            this.menuArcIconPx = iconPx * k;
+            this.menuArcTextPx = this.menuTextPx * k;
+            this.menuArcTextGapPx = this.menuTextGapPx * k;
+            this.menuArcCell = cell * k;
+            for (int r = 0; r < ringCount; ++r) {
+                radii[r] *= k;
+            }
+            maxR *= k;
+            itemR *= k;
+            float outer = maxR + itemR;
+
+            // ---- 圆心：优先落在触发点上，越界就往内推 ----
+            float loX = pad + outer;
+            float hiX = w - pad - outer;
+            float loY = pad + outer;
+            float hiY = h - pad - outer;
+            float cx = this.menuArcX;
+            float cy = this.menuArcY;
+            // 圆太大（或画布太小）导致 lo > hi 时退化为居中，
+            // 比把圆心硬夹到某个方向上更合理。
+            if (hiX < loX) {
+                float mid = w / 2.0f;
+                loX = hiX = mid;
+            }
+            if (hiY < loY) {
+                float mid = h / 2.0f;
+                loY = hiY = mid;
+            }
+            cx = Math.min(Math.max(cx, loX), hiX);
+            cy = Math.min(Math.max(cy, loY), hiY);
+
+            // ---- 生成每一项的位置 ----
+            this.menuRects.clear();
+            float ic = this.menuArcIconPx;
+            int idx = 0;
+            for (int r = 0; r < ringCount && idx < n; ++r) {
+                int c = cnt[r];
+                float R = radii[r];
+                for (int j = 0; j < c && idx < n; ++j, ++idx) {
+                    float px;
+                    float py;
+                    if (c == 1) {
+                        // 单项环：放正上方，避免 0 度距退化
+                        px = cx;
+                        py = cy - R;
+                    } else {
+                        // 从正上方开始顺时针均分。用 -90° 起手是为了让
+                        // 每一环的第 1 项都落在正上方 —— 位置稳定，
+                        // 不会因项数变化而整体旋转。
+                        double a = -Math.PI / 2.0 + 2.0 * Math.PI * j / c;
+                        px = cx + (float) (Math.cos(a) * R);
+                        py = cy + (float) (Math.sin(a) * R);
+                    }
+                    this.menuRects.add(new RectF(px - ic / 2.0f, py - ic / 2.0f,
+                            px + ic / 2.0f, py + ic / 2.0f));
+                }
+            }
+            this.menuCx = cx;
+            this.menuCy = cy;
+            // 最外环半径记下来：drawMenu 用它画中心提示点、日志也靠它。
+            this.menuRing0R = maxR;
         }
 
         private void layoutMenuLine(int w, int h, float cell, float gap, float pad, int n) {
@@ -1687,72 +1892,117 @@ extends Service {
             float textPx = this.menuArc ? this.menuArcTextPx : this.menuTextPx;
             float f = textGap = this.menuArc ? this.menuArcTextGapPx : this.menuTextGapPx;
             if (this.menuArc && this.menuRing0R > 0.0f) {
-                float br = Math.min(iconPx / 2.0f * 0.92f, this.menuRing0R * 0.45f);
+                // 圆心处画一个小圆点当「起点」标记。
+                // 斜排时这个半径随排长变化，环形时固定小尺寸 ——
+                // 环形的半径可能就是两三百 px，跟着它变会顶到图标上去。
+                float br = this.menuRing
+                        ? Math.min(iconPx * 0.15f, this.menuRing0R * 0.3f)
+                        : Math.min(iconPx / 2.0f * 0.92f, this.menuRing0R * 0.45f);
                 p.setColor(this.menuFillLight ? 0x26FFFFFF : -1725816286);
                 c.drawCircle(this.menuCx, this.menuCy, br, p);
                 stroke.setStrokeWidth((float)this.dp(1.5f));
                 stroke.setColor(this.menuFillLight ? 0x22FFFFFF : 0x55FFFFFF);
                 c.drawCircle(this.menuCx, this.menuCy, br, stroke);
             }
+            // 分两趟画：先画所有「没被指着」的项，最后再画悬停项。
+            // 悬停项放大了 1.3 倍，会盖到邻居头上 —— 如果按索引顺序画，
+            // 排在它后面的邻居就会把放大后的圆切掉一块。
+            // 单独拎出来最后画，效果就是「浮在最上层」。
             for (int i = 0; i < n; ++i) {
-                String t;
-                Drawable d;
-                RectF r = this.menuRects.get(i);
-                boolean on = i == this.menuHover;
-                float cx0 = r.centerX();
-                float cy0 = r.top + iconPx / 2.0f;
-                float rad = iconPx / 2.0f;
-                p.setColor(on ? this.menuSelColor : this.menuBgColor);
-                c.drawCircle(cx0, cy0, rad, p);
-                stroke.setStrokeWidth(on ? (float)this.dp(3.0f) : (float)this.dp(1.5f));
-                if (on) {
-                    stroke.setColor(-1);
-                } else {
-                    boolean lightBg = this.isLightColor(this.menuBgColor);
-                    stroke.setColor(lightBg ? 0x22000000 : 0x66FFFFFF);
+                if (i != this.menuHover) {
+                    this.drawMenuItem(c, p, stroke, i, iconPx, textPx, textGap);
                 }
-                c.drawCircle(cx0, cy0, rad, stroke);
-                Drawable drawable2 = d = i < this.menuIcons.size() ? this.menuIcons.get(i) : null;
-                if (d != null) {
-                    float side = iconPx * 0.62f;
-                    float cx = cx0;
-                    float cy = cy0;
-                    // 图标绘制兜底：第三方应用的 Drawable 五花八门，
-                    // 有的在 setBounds/draw 时会抛异常（自定义 Drawable、
-                    // 已失效的 RemoteViews 资源等）。一个图标画不出来
-                    // 不该让整个菜单——乃至整个悬浮窗——崩掉。
-                    try {
-                        d.setBounds(Math.round(cx - side / 2.0f), Math.round(cy - side / 2.0f), Math.round(cx + side / 2.0f), Math.round(cy + side / 2.0f));
-                        d.draw(c);
-                    } catch (Throwable dt) {
-                        AppLog.e(EdgeGestureService.TAG, "菜单图标绘制失败, 该项退化为文字: "
-                                + (i < this.menuItems.size() ? this.menuItems.get(i).source : "?"), dt);
-                        this.drawMenuTextFallback(c, i, cx0, cy0, iconPx, on, p);
-                    }
-                } else {
-                    String t2 = this.menuItems.get((int)i).text;
-                    if (t2 != null && t2.length() > 0) {
-                        // 没有图标就用文字顶着，取前两个字 ——
-                        // 一个字信息量太少（「微」「设」看不出是哪个应用），
-                        // 两个字基本能认出来，又不至于溢出圆底。
-                        // 名字本来就只有一个字时，自然只显示一个字。
-                        String label = t2.length() > 2 ? t2.substring(0, 2) : t2;
-                        p.setColor(on ? -1 : (this.isLightColor(this.menuBgColor) ? -14540254 : -1));
-                        // 两个字比一个字宽，字号相应收一点，免得顶出圆底。
-                        p.setTextSize(iconPx * (label.length() > 1 ? 0.26f : 0.34f));
-                        p.setTextAlign(Paint.Align.CENTER);
-                        float cy = cy0 - (p.descent() + p.ascent()) / 2.0f;
-                        c.drawText(label, cx0, cy, p);
-                    }
-                }
-                if (!this.menuShowText || (t = this.menuItems.get((int)i).text) == null || t.length() <= 0) continue;
-                p.setColor(on ? this.menuSelColor : this.menuTextColor);
-                p.setTextSize(textPx);
-                p.setTextAlign(Paint.Align.CENTER);
-                Paint.FontMetrics fm = p.getFontMetrics();
-                float ty = r.top + iconPx + textGap - fm.ascent;
-                c.drawText(t, cx0, ty, p);
             }
+            if (this.menuHover >= 0 && this.menuHover < n) {
+                this.drawMenuItem(c, p, stroke, this.menuHover, iconPx, textPx, textGap);
+            }
+        }
+
+        /** 画菜单里的第 i 项：圆底 + 描边 + 图标（或文字兜底）+ 下方说明文字。 */
+        private void drawMenuItem(Canvas c, Paint p, Paint stroke, int i,
+                                  float iconPx, float textPx, float textGap) {
+            String t;
+            Drawable d;
+            RectF r = this.menuRects.get(i);
+            boolean on = i == this.menuHover;
+            float cx0 = r.centerX();
+            // 悬停项整体放大：圆底、图标、描边一起涨，中心点不动。
+            // 这样「手指正指着的那个」在视觉上会明显浮起来，
+            // 而不只是换个颜色 —— 手指本身挡住了大半图标，靠颜色看不出来。
+            float sc = on ? MENU_HOVER_SCALE : 1.0f;
+            float rad = iconPx / 2.0f * sc;
+            float cy0 = r.top + iconPx / 2.0f;
+            p.setColor(on ? this.menuSelColor : this.menuBgColor);
+            c.drawCircle(cx0, cy0, rad, p);
+            stroke.setStrokeWidth(on ? (float)this.dp(3.0f) : (float)this.dp(1.5f));
+            if (on) {
+                stroke.setColor(-1);
+            } else {
+                boolean lightBg = this.isLightColor(this.menuBgColor);
+                stroke.setColor(lightBg ? 0x22000000 : 0x66FFFFFF);
+            }
+            c.drawCircle(cx0, cy0, rad, stroke);
+            Drawable drawable2 = d = i < this.menuIcons.size() ? this.menuIcons.get(i) : null;
+            if (d != null) {
+                // 图标跟着圆底一起放大，否则「圈变大了、图标没变」看起来是空的。
+                float side = iconPx * 0.62f * sc;
+                float cx = cx0;
+                float cy = cy0;
+                // 图标绘制兜底：第三方应用的 Drawable 五花八门，
+                // 有的在 setBounds/draw 时会抛异常（自定义 Drawable、
+                // 已失效的 RemoteViews 资源等）。一个图标画不出来
+                // 不该让整个菜单——乃至整个悬浮窗——崩掉。
+                try {
+                    d.setBounds(Math.round(cx - side / 2.0f), Math.round(cy - side / 2.0f), Math.round(cx + side / 2.0f), Math.round(cy + side / 2.0f));
+                    d.draw(c);
+                } catch (Throwable dt) {
+                    AppLog.e(EdgeGestureService.TAG, "菜单图标绘制失败, 该项退化为文字: "
+                            + (i < this.menuItems.size() ? this.menuItems.get(i).source : "?"), dt);
+                    this.drawMenuTextFallback(c, i, cx0, cy0, iconPx * sc, on, p);
+                }
+            } else {
+                String t2 = this.menuItems.get((int)i).text;
+                if (t2 != null && t2.length() > 0) {
+                    // 没有图标就用文字顶着，取前两个字 ——
+                    // 一个字信息量太少（「微」「设」看不出是哪个应用），
+                    // 两个字基本能认出来，又不至于溢出圆底。
+                    // 名字本来就只有一个字时，自然只显示一个字。
+                    String label = t2.length() > 2 ? t2.substring(0, 2) : t2;
+                    p.setColor(on ? -1 : (this.isLightColor(this.menuBgColor) ? -14540254 : -1));
+                    // 两个字比一个字宽，字号相应收一点，免得顶出圆底。
+                    p.setTextSize(iconPx * (label.length() > 1 ? 0.26f : 0.34f) * sc);
+                    p.setTextAlign(Paint.Align.CENTER);
+                    float cy = cy0 - (p.descent() + p.ascent()) / 2.0f;
+                    c.drawText(label, cx0, cy, p);
+                }
+            }
+            if (!this.menuShowText || (t = this.menuItems.get((int)i).text) == null || t.length() <= 0) {
+                return;
+            }
+            p.setColor(on ? this.menuSelColor : this.menuTextColor);
+            // 说明文字不放大：一放大就可能压到相邻项、环形下还会顶到外环图标。
+            // 位置按「放大后的圆底底边」往下挪，免得大圆盖住自己的文字。
+            p.setTextSize(textPx);
+            p.setTextAlign(Paint.Align.CENTER);
+            Paint.FontMetrics fm = p.getFontMetrics();
+            // 文字统一放在图标正下方 —— 斜排、环形都一样。
+            // 环形之所以也敢这么做，是因为 layoutMenuRing 给每一环留的
+            // 间距就是「图标 + 整段文字高度 + 环间距」，文字占的那一块
+            // 位置是提前预留过的，不会和旁边一环的图标撞上。
+            //
+            // 下移量 = 圆底半径的增量，但要封顶：放大到 1.6 倍时增量为
+            // 0.3×iconPx，若原样下移，环形下会顶到外环的图标、斜排下会
+            // 钻进下一排。封到「行距余量的一半」为止 —— 既不让大圆压字，
+            // 也不会把文字推到别的项身上。
+            // 行距余量 = dp 里的项间距（斜排是每排间距、环形是环间距）。
+            float push = rad - iconPx / 2.0f;
+            float gapDp = (float) this.dp(EdgeGesturePrefs.getMenuRingGap(this.getContext()));
+            float pushCap = Math.max(0.0f, (gapDp - textGap) * 0.5f);
+            if (push > pushCap) {
+                push = pushCap;
+            }
+            float ty = r.top + iconPx + textGap - fm.ascent + push;
+            c.drawText(t, cx0, ty, p);
         }
 
         public boolean onTouchEvent(MotionEvent e) {

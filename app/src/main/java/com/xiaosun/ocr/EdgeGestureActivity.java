@@ -7,7 +7,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -20,11 +19,13 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.util.ArrayList;
 import java.util.List;
+
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
  * 边缘滑动触发 —— 设置主页面。
@@ -38,7 +39,7 @@ import java.util.List;
  * ════════════════════════════════════════════════════════════════
  * 手势本身只负责「产生事件」，具体干什么由宏决定：
  *
- *   宏 → 触发器：「小孙OCR · 边缘滑动事件」
+ *   宏 → 触发器：「Grace · 边缘滑动事件」
  *   选好方向即可；方向不符的宏根本不会被触发。
  *
  *   滑出菜单选完后，插件把结果交给宏 ——
@@ -50,16 +51,6 @@ import java.util.List;
  */
 public class EdgeGestureActivity extends AppCompatActivity {
 
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_BRAND_SOFT = 0xFFEDF0FE;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_SURFACE = 0xFFFFFFFF;
-    private static final int C_BG = 0xFFF5F6FA;
-    private static final int C_OK = 0xFF12B76A;
-    private static final int C_WARN = 0xFFF79009;
 
     private LinearLayout content;
     private Switch mainSwitch;
@@ -81,7 +72,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
 
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(16), dp(14), dp(16), dp(40));
+        content.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 40));
         sv.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -105,28 +96,26 @@ public class EdgeGestureActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(C_BRAND);
-        bar.setPadding(dp(8), dp(14), dp(16), dp(14));
+        // 与首页统一的浅灰顶栏（原来是蓝底白字）。右上角「⋮」已移除，只留首页。
+        bar.setBackgroundColor(C_BG);
+        bar.setPadding(dp(this, 8), dp(this, 14), dp(this, 16), dp(this, 14));
 
         TextView back = new TextView(this);
         back.setText("←");
         back.setTextSize(24);
-        back.setTextColor(Color.WHITE);
+        back.setTextColor(C_TEXT);
         back.setGravity(Gravity.CENTER);
+        back.setContentDescription("返回");
         back.setOnClickListener(v -> finish());
-        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(back, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
 
         TextView title = new TextView(this);
-        title.setText("边缘滑动触发");
+        title.setText("边缘手势");
         title.setTextSize(18);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(C_TEXT);
         bar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        // 右上角「⋮」：日志等杂项的入口，见 LogCard.buildMenuButton
-        bar.addView(LogCard.buildMenuButton(this),
-                new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         return bar;
     }
@@ -142,8 +131,11 @@ public class EdgeGestureActivity extends AppCompatActivity {
         buildMainSwitch();
         buildPermissionCard();
         buildHandlesCard();
-        buildBurnInCard();
+        // 手柄滑过之后弹什么：滑动菜单是「手柄方向行为」的一部分，
+        // 放在手柄列表下面，顺序与用户的心理模型一致（先有手柄，才谈菜单）。
+        buildMenuCard();
         buildBlacklistCard();
+        buildBurnInCard();
         // 日志已收进顶栏「⋮」菜单（LogCard.buildMenuButton），不再占页面底部。
     }
 
@@ -168,15 +160,8 @@ public class EdgeGestureActivity extends AppCompatActivity {
 
         card.addView(row, wide());
 
-        TextView hint = new TextView(this);
-        hint.setTextSize(12);
-        hint.setTextColor(C_SUB);
-        hint.setLineSpacing(0f, 1.3f);
-        hint.setText("手指按在手柄上朝任意方向滑动，滑过设定距离即触发。");
-        LinearLayout.LayoutParams hl = wide();
-        hl.topMargin = dp(6);
-        card.addView(hint, hl);
-
+        // 原先这里还有一行「手指按在手柄上朝任意方向滑动，滑过设定距离即触发。」
+        // —— 纯操作说明，看一眼手柄就知道怎么用，页面不必再教一遍。
         content.addView(card, cardLp());
         refreshStatus();
     }
@@ -248,7 +233,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         if (canOverlay()) return;
 
         LinearLayout card = card();
-        card.setBackground(borderedBg(C_SURFACE, 0x33F79009, 14));
+        card.setBackground(borderedBg(this, C_SURFACE, 0x33F79009, 14));
 
         permText = new TextView(this);
         permText.setText("缺少「悬浮窗权限」");
@@ -263,13 +248,13 @@ public class EdgeGestureActivity extends AppCompatActivity {
         d.setLineSpacing(0f, 1.3f);
         d.setText("手柄是悬浮窗，必须授予此权限才能显示。");
         LinearLayout.LayoutParams dl = wide();
-        dl.topMargin = dp(6);
+        dl.topMargin = dp(this, 6);
         card.addView(d, dl);
 
         Button go = primaryButton("去开启");
         go.setOnClickListener(v -> requestOverlay());
         LinearLayout.LayoutParams gl = wide();
-        gl.topMargin = dp(12);
+        gl.topMargin = dp(this, 12);
         card.addView(go, gl);
 
         content.addView(card, cardLp());
@@ -299,10 +284,10 @@ public class EdgeGestureActivity extends AppCompatActivity {
         add.setText("＋ 添加");
         add.setTextSize(13);
         add.setTextColor(C_BRAND);
-        add.setPadding(dp(12), dp(6), dp(12), dp(6));
+        add.setPadding(dp(this, 12), dp(this, 6), dp(this, 12), dp(this, 6));
         GradientDrawable ab = new GradientDrawable();
         ab.setColor(C_BRAND_SOFT);
-        ab.setCornerRadius(dp(8));
+        ab.setCornerRadius(dp(this, 8));
         add.setBackground(ab);
         add.setOnClickListener(v -> addHandle());
         head.addView(add);
@@ -315,17 +300,17 @@ public class EdgeGestureActivity extends AppCompatActivity {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(11), 0, dp(11));
+            row.setPadding(0, dp(this, 11), 0, dp(this, 11));
 
             // 左侧小色条，直观反映手柄在屏幕上的样子
             View swatch = new View(this);
             GradientDrawable sg = new GradientDrawable();
             sg.setColor(withAlpha(h.color, h.alpha));
-            sg.setCornerRadius(dp(Math.max(2, Math.min(6, h.radius))));
+            sg.setCornerRadius(dp(this, Math.max(2, Math.min(6, h.radius))));
             swatch.setBackground(sg);
             LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                    dp(10), dp(36));
-            sl.rightMargin = dp(12);
+                    dp(this, 10), dp(this, 36));
+            sl.rightMargin = dp(this, 12);
             row.addView(swatch, sl);
 
             LinearLayout col = new LinearLayout(this);
@@ -350,7 +335,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
             arrow.setText("›");
             arrow.setTextSize(20);
             arrow.setTextColor(C_HINT);
-            arrow.setPadding(dp(8), 0, 0, 0);
+            arrow.setPadding(dp(this, 8), 0, 0, 0);
             row.addView(arrow);
 
             row.setOnClickListener(v ->
@@ -361,7 +346,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
             View line = new View(this);
             line.setBackgroundColor(C_DIVIDER);
             card.addView(line, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 1)));
         }
 
         content.addView(card, cardLp());
@@ -405,6 +390,67 @@ public class EdgeGestureActivity extends AppCompatActivity {
 
         content.postDelayed(this::rebuild, 200);
         EdgeGestureEditorActivity.open(this, h.id);
+    }
+
+    // ============================================================
+    //  滑动菜单入口
+    // ============================================================
+
+    /**
+     * 「滑过手柄之后弹出的一排按钮」的入口卡。
+     *
+     * 菜单的外观 / 布局 / 配色 / 菜单项都在
+     * {@link EdgeGestureMenuActivity} 里调 —— 那一页本身就有十几个
+     * 分组控件，塞进本页会让「手柄列表」被挤到看不见。
+     * 这里只给一行状态 + 跳转，和下面的黑名单卡保持同一套视觉。
+     */
+    private void buildMenuCard() {
+        LinearLayout card = card();
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        TextView t = new TextView(this);
+        t.setText("滑动菜单");
+        t.setTextSize(14.5f);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        t.setTextColor(C_TEXT);
+        col.addView(t);
+
+        TextView s = new TextView(this);
+        s.setTextSize(11.5f);
+        s.setTextColor(C_HINT);
+        s.setLineSpacing(0f, 1.3f);
+        boolean on = EdgeGesturePrefs.isMenuEnabled(this);
+        int n = EdgeGesturePrefs.getMenuItems(this).size();
+        if (!on) {
+            s.setText("未启用 · 滑过手柄即直接触发宏");
+        } else if (n == 0) {
+            s.setText("已启用 · 还没有菜单项，滑过去不会弹");
+            s.setTextColor(C_WARN);
+        } else {
+            s.setText("已启用 · " + n + " 项，滑到某项上抬手才触发");
+        }
+        col.addView(s);
+
+        row.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(20);
+        arrow.setTextColor(C_HINT);
+        arrow.setPadding(dp(this, 8), 0, 0, 0);
+        row.addView(arrow);
+
+        row.setOnClickListener(v -> EdgeGestureMenuActivity.open(this));
+
+        card.addView(row, wide());
+        content.addView(card, cardLp());
     }
 
     // ============================================================
@@ -459,7 +505,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         arrow.setText("›");
         arrow.setTextSize(20);
         arrow.setTextColor(C_HINT);
-        arrow.setPadding(dp(8), 0, 0, 0);
+        arrow.setPadding(dp(this, 8), 0, 0, 0);
         row.addView(arrow);
 
         row.setOnClickListener(v -> EdgeGestureBlacklistActivity.open(this));
@@ -476,7 +522,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
             warn.setText("⚠ 前台应用侦测未就绪（没开无障碍），"
                     + "黑名单暂时不会生效。点进去开启。");
             LinearLayout.LayoutParams wl = wide();
-            wl.topMargin = dp(8);
+            wl.topMargin = dp(this, 8);
             card.addView(warn, wl);
         }
 
@@ -517,7 +563,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
         g.setColor(Color.TRANSPARENT);
-        g.setStroke(dp(2), on ? C_BRAND : C_HINT);
+        g.setStroke(dp(this, 2), on ? C_BRAND : C_HINT);
         tv.setBackground(g);
         tv.setText(on ? "●" : "");
         tv.setTextColor(C_BRAND);
@@ -531,15 +577,15 @@ public class EdgeGestureActivity extends AppCompatActivity {
     private LinearLayout card() {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        c.setPadding(dp(16), dp(14), dp(16), dp(14));
-        c.setElevation(dp(1));
+        c.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 14));
+        c.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        c.setElevation(dp(this, 1));
         return c;
     }
 
     private LinearLayout.LayoutParams cardLp() {
         LinearLayout.LayoutParams lp = wide();
-        lp.bottomMargin = dp(12);
+        lp.bottomMargin = dp(this, 12);
         return lp;
     }
 
@@ -559,20 +605,12 @@ public class EdgeGestureActivity extends AppCompatActivity {
         b.setTextColor(Color.WHITE);
         GradientDrawable g = new GradientDrawable();
         g.setColor(C_BRAND);
-        g.setCornerRadius(dp(10));
+        g.setCornerRadius(dp(this, 10));
         b.setBackground(g);
         return b;
     }
 
-    private GradientDrawable borderedBg(int fill, int stroke, float radiusDp) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(fill);
-        g.setCornerRadius(dp(radiusDp));
-        g.setStroke(dp(1), stroke);
-        return g;
-    }
-
-    // ============================================================
+        // ============================================================
     //  防烧屏
     // ============================================================
 
@@ -580,15 +618,9 @@ public class EdgeGestureActivity extends AppCompatActivity {
         LinearLayout card = card();
         card.addView(label("防烧屏"), wide());
 
-        TextView hint = new TextView(this);
-        hint.setTextSize(12);
-        hint.setTextColor(C_SUB);
-        hint.setLineSpacing(0f, 1.3f);
-        hint.setText("手柄常驻不动，OLED 屏会留下残影。开启后手柄会隔一段时间"
-                + "轻微上下挪几像素，肉眼几乎看不出，但足以错开发光像素。");
-        LinearLayout.LayoutParams hl = wide();
-        hl.topMargin = dp(6);
-        card.addView(hint, hl);
+        // 原先这里有一段长说明（OLED 残影原理 + 漂移怎么起作用），
+        // 以及卡片底部一行「幅度越大越保险，越小越不显眼。0 = 不漂移。」。
+        // 都是功能介绍，不是操作，已删；滑块本身标着单位和范围，调一下就明白。
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -635,15 +667,6 @@ public class EdgeGestureActivity extends AppCompatActivity {
         addSlider(card, "漂移间隔", EdgeGesturePrefs.getBurnInIntervalSec(this),
                 15, 300, " 秒", v -> EdgeGesturePrefs.setBurnInIntervalSec(this, v));
 
-        TextView tip = new TextView(this);
-        tip.setTextSize(11.5f);
-        tip.setTextColor(C_HINT);
-        tip.setLineSpacing(0f, 1.35f);
-        tip.setText("幅度越大越保险，越小越不显眼。0 = 不漂移。");
-        LinearLayout.LayoutParams tl = wide();
-        tl.topMargin = dp(10);
-        card.addView(tip, tl);
-
         content.addView(card, cardLp());
     }
 
@@ -678,7 +701,7 @@ public class EdgeGestureActivity extends AppCompatActivity {
         val.setTextColor(C_BRAND);
         val.setTypeface(null, android.graphics.Typeface.BOLD);
         val.setGravity(Gravity.END);
-        row.addView(val, new LinearLayout.LayoutParams(dp(64),
+        row.addView(val, new LinearLayout.LayoutParams(dp(this, 64),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         SeekBar sb = new SeekBar(this);
@@ -706,21 +729,11 @@ public class EdgeGestureActivity extends AppCompatActivity {
 
     private LinearLayout.LayoutParams topMargin(int dpValue) {
         LinearLayout.LayoutParams lp = wide();
-        lp.topMargin = dp(dpValue);
+        lp.topMargin = dp(this, dpValue);
         return lp;
     }
 
-    private LinearLayout.LayoutParams wide() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
-    }
-
-    private void toast(String msg) {
+            private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
 

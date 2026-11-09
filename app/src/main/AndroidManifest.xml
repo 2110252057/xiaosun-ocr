@@ -131,6 +131,31 @@
         </activity>
 
         <!--
+          文字识别页：首页点「文字识别」卡片进入，按返回回到首页。
+          exported=false —— 只允许本应用拉起（插件/BroadcastReceiver 也用得到）。
+        -->
+        <activity
+            android:name=".OcrActivity"
+            android:exported="false"
+            android:label="文字识别" />
+
+        <!--
+          全屏框选页。
+
+          exported=false：只由本应用拉起，不对外开放。
+          theme 用全黑的 RegionSelectTheme —— 这一页要"变成那张截图"，
+          浅色主题会让状态栏横着一条不属于截图的浅灰条（理由见 themes.xml）。
+
+          不写 excludeFromRecents：万一用户误触 Home 键，还能从最近任务
+          回到这个框选界面继续操作，而不是丢掉已经截好的图。
+        -->
+        <activity
+            android:name=".RegionSelectActivity"
+            android:exported="false"
+            android:label="框选区域"
+            android:theme="@style/RegionSelectTheme" />
+
+        <!--
           截屏授权中转 Activity。
 
           插件（BroadcastReceiver）无法直接弹 MediaProjection 授权框，
@@ -230,8 +255,8 @@
              ★ 关于「触发器」，只提供**事件**这一种身份。
 
                插件本身在历史上也声明过 EDIT_CONDITION（条件身份），于是宿主
-               触发器列表里会同时出现「小孙OCR · 边缘滑动手势」与
-               「小孙OCR · 边缘滑动事件」两个条目，功能、配置界面完全一样，
+               触发器列表里会同时出现「Grace · 边缘滑动手势」与
+               「Grace · 边缘滑动事件」两个条目，功能、配置界面完全一样，
                差别只在事件身份附带防伪数据（随机 message id + 60 秒有效期），
                条件身份只能读进程内的「最近一次手势」快照。
 
@@ -272,7 +297,7 @@
           ★ 它自己不挂任何 intent-filter —— 只作为两个别名的 targetActivity 存在。
 
           为什么要这样收：此前它直接声明了 EDIT_CONDITION，于是宿主的
-          触发器列表里出现了「小孙OCR · 边缘滑动手势」（条件身份）。
+          触发器列表里出现了「Grace · 边缘滑动手势」（条件身份）。
           但条件身份没有防伪数据，只能读进程内的「最近一次手势」快照，
           理论上一条伪造广播就能骗过它；而事件身份带随机 message id +
           60 秒有效期，是真的验过才认。两个入口功能一样、配置界面一样，
@@ -288,8 +313,8 @@
           动作身份：识别屏幕文字。
 
           做成 alias 而不是写在本体上，只是为了**名字**：
-          本体没有自己的 label，动作别名在动作列表里叫「小孙OCR」，
-          事件别名在触发器列表里叫「小孙OCR · 边缘滑动事件」，
+          本体没有自己的 label，动作别名在动作列表里叫「Grace」，
+          事件别名在触发器列表里叫「Grace · 边缘滑动事件」，
           各说各话、不互相误导。两个身份共用同一个 Activity 类，代码零重复。
 
           theme 也显式写死，避免 alias 继承行为在不同 ROM 上出现差异
@@ -312,7 +337,7 @@
           必须用 activity-alias 且 target 指向配置界面 —— 这是原版
           com.dxam.presencedetector 的做法（它也是 alias 到 PluginConfigActivity）。
           alias 的 label 决定它在宿主「事件」列表里的显示名，
-          也就是用户在宏里看到的「小孙OCR · 边缘滑动事件」。
+          也就是用户在宏里看到的「Grace · 边缘滑动事件」。
         -->
         <activity-alias
             android:name=".TaskerEventConfigActivity"
@@ -371,7 +396,7 @@
             android:name=".EdgeGestureActivity"
             android:excludeFromRecents="true"
             android:exported="false"
-            android:label="边缘滑动触发" />
+            android:label="边缘手势" />
         <activity
             android:name=".EdgeGestureEditorActivity"
             android:excludeFromRecents="true"
@@ -396,6 +421,28 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:label="手柄黑名单" />
+        <!--
+          无障碍管理（用 root 直接开关任意应用的无障碍服务）。
+          和上面几页同性质：纯配置界面，只由本应用拉起。
+          这一页会执行 su 命令，但权限是用户自己在 root 管理器里授予的，
+          exported=false 保证外部应用无法借此页触发 root 操作。
+        -->
+        <activity
+            android:name=".A11yActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="无障碍管理" />
+        <!--
+          设备概览（CPU / 内存 / GPU / 温度 / 电池）。
+          纯读 /proc 与 /sys，不需要任何权限；「进程占用」那一块才用 su，
+          而 su 是用户自己在 root 管理器里授权的。exported=false 保证
+          外部应用无法拉起这一页。
+        -->
+        <activity
+            android:name=".DeviceOverviewActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="设备概览" />
         <service
             android:name=".EdgeGestureService"
             android:enabled="true"

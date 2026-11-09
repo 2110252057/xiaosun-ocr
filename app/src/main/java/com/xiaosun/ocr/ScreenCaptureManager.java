@@ -10,7 +10,6 @@ import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.DisplayMetrics;

@@ -148,6 +148,17 @@ public class OcrHttpServer extends NanoHTTPD {
             if ("/ocr".equals(uri)) {
                 return handleOcrShortcut(session);
             }
+            // ---------- 只截屏、不识别 ----------
+            // 供「区域识别」用：界面需要先看到整屏、才能让用户框选一块。
+            // 若走 POST / 拿图，就白白多识别了一次整屏（大图 + 大模型，几百毫秒起）。
+            // 对插件也有用：想自己裁一块再调识别时，先拿一张原图更灵活。
+            if ("/shot".equals(uri)) {
+                // 支持 ?capture=accessibility|root|projection 指定截屏方式；
+                // 不传则维持原来的「自动挑一条能用的」。
+                Map<String, String> q = session.getParms();
+                String capMode = q == null ? null : q.get("capture");
+                return handleShotOnly(capMode);
+            }
 
             // 【修复⑩：404 兜底】精确匹配后，其余任何路径都不是合法路由。
             // 原来没有这一段，未知路径会掉进下面的 POST 分支：
@@ -155,7 +166,7 @@ public class OcrHttpServer extends NanoHTTPD {
             // 调用方拼错路径时完全看不出问题。现在明确回 404。
             if (!"/".equals(uri)) {
                 return json("{\"status\": 404, \"data\": \"Error: no such route '" + uri
-                        + "', available: POST /, GET /last, GET /ocr\"}");
+                        + "', available: POST /, GET /last, GET /ocr, GET /shot\"}");
             }
 
             if (session.getMethod() != Method.POST) {
@@ -165,8 +176,25 @@ public class OcrHttpServer extends NanoHTTPD {
             String path = null;
             String typeStr = null;
             String tierStr = null;
+            /**
+             * 区域识别范围，格式 "left,top,right,bottom"，取值 0~1 的归一化比例。
+             *
+             * 【为什么用比例而不是像素】
+             * 调用方（界面）手里的预览图是降采样过的，与截屏原图尺寸不同；
+             * 若传像素，就得先知道原图尺寸，多一轮往返。传比例则与分辨率无关，
+             * 服务端拿到图后自己乘真实宽高，怎么缩放都不会偏。
+             */
+            String regionStr = null;
             /** 仅切换档位、不做识别的标识（action=setTier）。 */
             String actionStr = null;
+            /**
+             * 截屏方式：auto / accessibility / root / projection。
+             *
+             * <p>不传或传 auto = 老的按序回退；传具体值就只用那一条，
+             * 该方式不可用时明确报错，**不跨方式回退**。
+             * 理由见 {@code OCRService.captureByMode} 的注释。
+             */
+            String captureStr = null;
 
             // 1) 必须先解析 body：
             //    - application/x-www-form-urlencoded -> NanoHTTPD 会把字段并入 session.getParms()
@@ -186,12 +214,15 @@ public class OcrHttpServer extends NanoHTTPD {
                 path = parms.get("path");
                 typeStr = parms.get("type");
                 tierStr = parms.get("tier");
+                regionStr = parms.get("region");
+                captureStr = parms.get("capture");
             }
-
             // 3) multipart 表单字段
             if (files.containsKey("path")) path = files.get("path");
             if (files.containsKey("type")) typeStr = files.get("type");
             if (files.containsKey("tier")) tierStr = files.get("tier");
+            if (files.containsKey("region")) regionStr = files.get("region");
+            if (files.containsKey("capture")) captureStr = files.get("capture");
 
             // 4) 原始 body：先按 JSON 解，再按表单解
             String postData = files.get("postData");
@@ -208,6 +239,8 @@ public class OcrHttpServer extends NanoHTTPD {
                     if (parsed.containsKey("path")) path = parsed.get("path");
                     if (parsed.containsKey("type")) typeStr = parsed.get("type");
                     if (parsed.containsKey("tier")) tierStr = parsed.get("tier");
+                    if (parsed.containsKey("region")) regionStr = parsed.get("region");
+                    if (parsed.containsKey("capture")) captureStr = parsed.get("capture");
                     // 必须一起取 action，否则 action=setTier 不生效，
                     // 会继续走到「没传 path 就截屏」的分支，导致切档位请求被截屏失败打断。
                     if (parsed.containsKey("action")) actionStr = parsed.get("action");
@@ -274,14 +307,28 @@ public class OcrHttpServer extends NanoHTTPD {
                 Log.i(TAG, "图片加载成功: " + bitmap.getWidth() + "x" + bitmap.getHeight());
             } else {
                 // 不传图片：自动截取当前屏幕后识别
-                Log.i(TAG, "[Screen] 未传图片，开始截屏识别");
-                if (!service.isScreenCaptureReady()) {
+                Log.i(TAG, "[Screen] 未传图片，开始截屏识别"
+                        + (captureStr == null ? "" : "，方式=" + captureStr));
+                // 指定了方式就只查那一条；否则维持「任一条可用即可」的老判断。
+                // 不能一律用 isScreenCaptureReady()：那样用户选了 root
+                // 而只有无障碍可用时会被放行，最后截出另一条路的结果。
+                boolean modeSpecified = captureStr != null
+                        && captureStr.length() > 0
+                        && !OCRService.CAPTURE_AUTO.equals(captureStr);
+                boolean captureReady = modeSpecified
+                        ? service.isCaptureModeReady(captureStr)
+                        : service.isScreenCaptureReady();
+                if (!captureReady) {
+                    String why = modeSpecified
+                            ? "requested capture mode '" + captureStr
+                                    + "' is not ready. Please enable it in Grace first."
+                            : "Device has no root; open the app and tap "
+                                    + "\\\"onScreenCapture\\\" once to authorize MediaProjection.";
                     return json("{\"status\": 403, \"data\": \"Error: Screen capture not available. "
-                            + "Device has no root; open the app and tap "
-                            + "\\\"onScreenCapture\\\" once to authorize MediaProjection.\"}");
+                            + why + "\"}");
                 }
                 try {
-                    bitmap = service.captureScreen();
+                    bitmap = service.captureByMode(captureStr);
                 } catch (Throwable t) {
                     Log.e(TAG, "[Screen] 截屏失败: " + t.getMessage());
                     return json("{\"status\": 500, \"data\": \"Error: Screen capture failed: "
@@ -310,6 +357,34 @@ public class OcrHttpServer extends NanoHTTPD {
             OCRService.lastOcrImageWidth = bitmap.getWidth();
             OCRService.lastOcrImageHeight = bitmap.getHeight();
 
+            // ---------- 区域识别：只把框出来的那一块送去引擎 ----------
+            // 【顺序很关键】必须在记录 lastOcrImageWidth 之后再裁剪，
+            // 且全图尺寸要单独存一份。原因见 OCRService.lastFullImageWidth 的注释：
+            // 引擎返回的坐标是相对「裁剪块」的，而界面与插件要的是全屏坐标，
+            // 少了偏移量这一层，框会整体往左上偏。
+            OCRService.lastFullImageWidth = bitmap.getWidth();
+            OCRService.lastFullImageHeight = bitmap.getHeight();
+            OCRService.lastRegionLeft = 0;
+            OCRService.lastRegionTop = 0;
+            String regionError = null;
+            float[] frac = parseRegion(regionStr);
+            if (frac != null) {
+                String[] err = new String[1];
+                Bitmap cropped = cropByRegion(bitmap, frac, err);
+                if (cropped == null) {
+                    regionError = err[0];
+                } else {
+                    bitmap = cropped;
+                }
+            }
+            if (regionError != null) {
+                // 参数本身不合法时按 400 明确回报，而不是静默退回全屏识别 ——
+                // 后者会让调用方以为「区域生效了」，实际拿到的是满屏结果，
+                // 坐标还带着不该有的偏移，排查起来极费劲。
+                bitmap.recycle();
+                return json("{\"status\": 400, \"data\": \"Error: " + regionError + "\"}");
+            }
+
             Log.i(TAG, "[OCR] type=" + type + ", size=" + bitmap.getWidth() + "x" + bitmap.getHeight()
                     + ", tier=" + OCRService.tierName(OCRService.currentTier));
             String result;
@@ -323,6 +398,11 @@ public class OcrHttpServer extends NanoHTTPD {
             if (result == null) {
                 result = "{\"status\": 500, \"data\": \"Error: OCR failed\"}";
             }
+            // 区域识别：把坐标从「裁剪块」平移回「全屏」。
+            // 放在这里而不是在 processBitmap 内部做，是因为换算本来属于
+            // 「这次请求用了多大一块图」，是 HTTP 层的事 —— 引擎只管自己那张图。
+            // type=1 是纯文本、没有坐标，shiftCoords 内部会因 data 不是数组而直接返回。
+            result = shiftCoords(result, OCRService.lastRegionLeft, OCRService.lastRegionTop);
             return json(result);
 
         } catch (Exception e) {
@@ -332,7 +412,17 @@ public class OcrHttpServer extends NanoHTTPD {
         }
     }
 
-    /** 解析 JSON 请求体，失败返回 null。 */
+    /**
+     * 解析 JSON 请求体，失败返回 null。
+     *
+     * <p>【为什么用一个字段名清单，而不是逐个 if】
+     * 原来这里是四个 `if (obj.has("xxx"))` 抄四遍。2.11 加 `region` 参数时
+     * 改了三处（query / multipart / 表单）却**漏了这一处**，症状极隐蔽：
+     * 界面明明传了 region，请求也 200，结果却是整屏识别 ——
+     * 因为 JSON body 里的 region 在这一步就被丢掉了，后面所有逻辑都没见过它。
+     * 更麻烦的是此时返回体里连 fullWidth/regionLeft 都没有，只能靠对比返回字段才发现。
+     * 现在改成遍历清单，加字段只需在清单里添一个名字。
+     */
     private Map<String, String> parseJson(String postData) {
         try {
             JsonElement el = JsonParser.parseString(postData);
@@ -341,17 +431,12 @@ public class OcrHttpServer extends NanoHTTPD {
             }
             JsonObject obj = el.getAsJsonObject();
             Map<String, String> map = new HashMap<>();
-            if (obj.has("path") && !obj.get("path").isJsonNull()) {
-                map.put("path", obj.get("path").getAsString());
-            }
-            if (obj.has("type") && !obj.get("type").isJsonNull()) {
-                map.put("type", obj.get("type").getAsString());
-            }
-            if (obj.has("tier") && !obj.get("tier").isJsonNull()) {
-                map.put("tier", obj.get("tier").getAsString());
-            }
-            if (obj.has("action") && !obj.get("action").isJsonNull()) {
-                map.put("action", obj.get("action").getAsString());
+            // ★ 这份清单必须与 handle() 里的取值保持一致，
+            //   少一个名字就等于那个参数在 JSON 传参下静默失效。
+            for (String k : new String[]{"path", "type", "tier", "action", "region", "capture"}) {
+                if (obj.has(k) && !obj.get(k).isJsonNull()) {
+                    map.put(k, obj.get(k).getAsString());
+                }
             }
             return map;
         } catch (Exception e) {
@@ -382,6 +467,245 @@ public class OcrHttpServer extends NanoHTTPD {
         } catch (Exception e) {
             Log.e(TAG, "[Form] 解析失败: " + e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * 按归一化比例裁剪位图，并把「裁剪块 → 全屏」的换算参数写进静态字段。
+     *
+     * <p>【为什么抽成方法】POST / 与 GET /ocr 两条路由都要做同一件事。
+     * 分开写两遍的话，日后调边界规则必然漏改一处 ——
+     * 本项目已经吃过「dp() 合并时漏掉 wideTop 调用点」的教训。
+     *
+     * <p>【副作用】会 recycle 传入的 {@code src}。调用方拿到返回值后
+     * 不要再碰旧引用，也不要再 recycle 它一次。
+     *
+     * @param src  全屏位图（所有权转移给本方法）
+     * @param frac {l, t, r, b} 归一化比例
+     * @param err  长度 ≥1 的数组，失败原因写入 err[0]
+     * @return 裁剪后的位图；失败返回 null（此时 src 未被 recycle，仍归调用方）
+     */
+    private Bitmap cropByRegion(Bitmap src, float[] frac, String[] err) {
+        int fullW = src.getWidth();
+        int fullH = src.getHeight();
+        int l = Math.round(frac[0] * fullW);
+        int t = Math.round(frac[1] * fullH);
+        int r = Math.round(frac[2] * fullW);
+        int b = Math.round(frac[3] * fullH);
+        // 夹在图的范围内。不做夹取的话，调用方传 1.0000001 之类的浮点误差
+        // 就会让 createBitmap 抛 IllegalArgumentException。
+        l = Math.max(0, Math.min(fullW - 1, l));
+        t = Math.max(0, Math.min(fullH - 1, t));
+        r = Math.max(l + 1, Math.min(fullW, r));
+        b = Math.max(t + 1, Math.min(fullH, b));
+        // 宽或高不足 8 像素时明确报错：这么小的块裁出来必然识别为空，
+        // 静默返回空结果会让调用方以为「图里就是没字」。
+        if (r - l < 8 || b - t < 8) {
+            err[0] = "region too small after scaling: " + (r - l) + "x" + (b - t);
+            return null;
+        }
+        Bitmap cropped;
+        try {
+            cropped = Bitmap.createBitmap(src, l, t, r - l, b - t);
+        } catch (Throwable th) {
+            err[0] = "crop failed: " + th.getMessage();
+            return null;
+        }
+        if (cropped == null || cropped == src) {
+            // createBitmap 在「裁剪范围等于整图」时可能直接返回原对象，
+            // 此时不能再 recycle 它，否则就把要用的图弄没了。
+            err[0] = "crop returned same or null bitmap";
+            return null;
+        }
+        // 全图尺寸在调用方已经存过，这里只更新「引擎视角」与偏移量。
+        OCRService.lastOcrImageWidth = cropped.getWidth();
+        OCRService.lastOcrImageHeight = cropped.getHeight();
+        OCRService.lastRegionLeft = l;
+        OCRService.lastRegionTop = t;
+        Log.i(TAG, "[Region] 裁剪 " + l + "," + t + " " + fullW + "x" + fullH
+                + " -> " + cropped.getWidth() + "x" + cropped.getHeight());
+        // 原图若已落盘给预览用就不必再留内存副本，立刻释放。
+        src.recycle();
+        return cropped;
+    }
+
+    /**
+     * 解析 {@code region} 参数为 0~1 的比例值 {left, top, right, bottom}。
+     *
+     * <p>同时接受两种写法：
+     * <ul>
+     *   <li>{@code 0.1,0.2,0.8,0.9} —— 比例（界面走这条）</li>
+     *   <li>{@code 10,20,80,90}    —— 百分数（手写插件时更顺手）</li>
+     * </ul>
+     * 判据是「四个数里有任何一个大于 1」，此时整体按百分数除以 100。
+     *
+     * @param raw 原始字符串；null / 空表示不做区域识别
+     * @return 比例数组；为空或格式非法时返回 null（等价于「不指定区域」）
+     */
+    private float[] parseRegion(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = raw.trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        String[] parts = s.split(",");
+        if (parts.length != 4) {
+            Log.w(TAG, "[Region] 段数不是 4，忽略: " + s);
+            return null;
+        }
+        float[] v = new float[4];
+        try {
+            for (int i = 0; i < 4; i++) {
+                v[i] = Float.parseFloat(parts[i].trim());
+            }
+        } catch (NumberFormatException e) {
+            Log.w(TAG, "[Region] 存在非数字，忽略: " + s);
+            return null;
+        }
+        boolean percent = false;
+        for (float f : v) {
+            if (f > 1.0f) {
+                percent = true;
+                break;
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            if (percent) {
+                v[i] = v[i] / 100f;
+            }
+            if (v[i] < 0f) v[i] = 0f;
+            if (v[i] > 1f) v[i] = 1f;
+        }
+        if (v[2] <= v[0] || v[3] <= v[1]) {
+            Log.w(TAG, "[Region] right/bottom 不大于 left/top，忽略: " + s);
+            return null;
+        }
+        return v;
+    }
+
+    /**
+     * 把识别结果里的坐标从「裁剪块坐标系」平移成「全屏坐标系」。
+     *
+     * <p>【为什么必须做这一步】区域识别时送进引擎的只是框内那一块，
+     * 引擎不知道自己在整屏的哪个位置，返回的 x/y 都相对裁剪块左上角。
+     * 若原样返回，插件会把「屏幕右下角的字」报成「屏幕左上角附近的字」，
+     * 差一个选区偏移，而且肉眼很难发现。
+     *
+     * <p>【为什么不动 w/h】裁剪是 1:1 取原图像素、没有缩放，
+     * 所以宽高无需换算。需要缩放的只有「界面把全屏坐标画到降采样预览图上」
+     * 那一步，由界面根据 fullWidth/Height 自行完成。
+     *
+     * @param result 引擎返回的 JSON 文本
+     * @param dx     选区左上角在全屏图里的 x
+     * @param dy     选区左上角在全屏图里的 y
+     * @return 改写后的 JSON（必定含 fullWidth/fullHeight/regionLeft/regionTop）；
+     *         解析失败时原样返回
+     */
+    private String shiftCoords(String result, int dx, int dy) {
+        if (result == null) {
+            return result;
+        }
+        // ★ 不能因为「偏移为 0」就提前返回。
+        // 2.12 首次真机验证就栽在这里：偏移为 0 时直接 return，于是
+        // fullWidth / fullHeight / regionLeft / regionTop 四个字段也跟着没写 ——
+        // 而调用方正是靠这四个字段判断「这次请求到底有没有做区域裁剪」。
+        // 现在无论有没有偏移，都先把换算依据写进去，再决定要不要平移坐标。
+        try {
+            JsonElement el = JsonParser.parseString(result);
+            if (el == null || !el.isJsonObject()) {
+                return result;
+            }
+            JsonObject obj = el.getAsJsonObject();
+            JsonElement dataEl = obj.get("data");
+            if (dataEl == null || !dataEl.isJsonArray()) {
+                return result;
+            }
+            // 先把「画布多大、选区在哪」写进去：这是调用方判断区域是否生效的唯一依据。
+            obj.addProperty("fullWidth", OCRService.lastFullImageWidth);
+            obj.addProperty("fullHeight", OCRService.lastFullImageHeight);
+            obj.addProperty("regionLeft", dx);
+            obj.addProperty("regionTop", dy);
+            if (dx == 0 && dy == 0) {
+                // 整屏识别：坐标本来就是全屏坐标，不必平移，但上面的字段要留下。
+                return obj.toString();
+            }
+            for (JsonElement item : dataEl.getAsJsonArray()) {
+                if (!item.isJsonObject()) {
+                    continue;
+                }
+                JsonObject o = item.getAsJsonObject();
+                // x/y 形式：native type=2 与 ML Kit 都用这套字段。
+                // 只平移「非负」的值：引擎用 -1 表示「这一项没有坐标」，
+                // 加上偏移会把它变成一个看似合法的正数。
+                if (o.has("x") && o.get("x").isJsonPrimitive()) {
+                    int x = o.get("x").getAsInt();
+                    if (x >= 0) {
+                        o.addProperty("x", x + dx);
+                    }
+                }
+                if (o.has("y") && o.get("y").isJsonPrimitive()) {
+                    int y = o.get("y").getAsInt();
+                    if (y >= 0) {
+                        o.addProperty("y", y + dy);
+                    }
+                }
+                // left/top/right/bottom 形式（部分档位输出）
+                if (o.has("left") && o.get("left").isJsonPrimitive()) {
+                    o.addProperty("left", o.get("left").getAsInt() + dx);
+                }
+                if (o.has("top") && o.get("top").isJsonPrimitive()) {
+                    o.addProperty("top", o.get("top").getAsInt() + dy);
+                }
+                if (o.has("right") && o.get("right").isJsonPrimitive()) {
+                    o.addProperty("right", o.get("right").getAsInt() + dx);
+                }
+                if (o.has("bottom") && o.get("bottom").isJsonPrimitive()) {
+                    o.addProperty("bottom", o.get("bottom").getAsInt() + dy);
+                }
+                // type=3 的多边形点集
+                JsonElement pts = o.get("points");
+                if (pts != null && pts.isJsonArray()) {
+                    shiftPoints(pts.getAsJsonArray(), dx, dy);
+                }
+            }
+            return obj.toString();
+        } catch (Throwable t) {
+            // 改写失败绝不能影响识别结果本身：宁可退回未平移的坐标 + 一条日志，
+            // 也好过让一次本来成功的识别变成 500。
+            Log.w(TAG, "[Region] 坐标换算失败，原样返回: " + t.getMessage());
+            return result;
+        }
+    }
+
+    /** 平移多边形点集，兼容扁平 [{@code x1,y1,x2,y2}] 与嵌套 [{@code [x,y]}] 两种形式。 */
+    private void shiftPoints(JsonArray arr, int dx, int dy) {
+        if (arr.size() == 0) {
+            return;
+        }
+        if (arr.get(0).isJsonPrimitive()) {
+            // 扁平形式：偶数下标是 x，奇数下标是 y
+            for (int i = 0; i < arr.size(); i++) {
+                JsonElement e = arr.get(i);
+                if (!e.isJsonPrimitive()) {
+                    continue;
+                }
+                arr.set(i, new com.google.gson.JsonPrimitive(
+                        e.getAsInt() + ((i % 2 == 0) ? dx : dy)));
+            }
+            return;
+        }
+        // 嵌套形式 [[x,y],[x,y]]
+        for (JsonElement e : arr) {
+            if (!e.isJsonArray()) {
+                continue;
+            }
+            JsonArray p = e.getAsJsonArray();
+            if (p.size() >= 2 && p.get(0).isJsonPrimitive() && p.get(1).isJsonPrimitive()) {
+                p.set(0, new com.google.gson.JsonPrimitive(p.get(0).getAsInt() + dx));
+                p.set(1, new com.google.gson.JsonPrimitive(p.get(1).getAsInt() + dy));
+            }
         }
     }
 
@@ -481,9 +805,83 @@ public class OcrHttpServer extends NanoHTTPD {
     }
 
     /**
+     * GET /shot：只截一张全屏图并落盘，不跑识别。
+     *
+     * <p>【为什么单独开一条路由】「区域识别」的交互是：先看到整屏 →
+     * 框选一块 → 只识别那一块。若拿 POST / 去取这张预览图，
+     * 就会白白先识别一次整屏 —— 一张 4K 图跑一遍检测 + 识别，
+     * 几百毫秒到几秒、几百 MB 峰值内存，全为了拿一张图，很亏。
+     *
+     * <p>返回的 JSON 结构与识别接口保持同一套惯例
+     * （{@code status} + {@code data}），方便调用方统一处理：
+     * <pre>
+     * {"status":200,"data":{"path":"/data/.../ocr_capture.png","width":1080,"height":2400}}
+     * </pre>
+     */
+    private Response handleShotOnly(String captureMode) {
+        try {
+            // 指定了方式就只查那一条，否则维持「任一条可用即可」的老判断。
+            // 不这样分的话，用户选了 root 而只有无障碍可用时，
+            // 这里会放行，然后在下面截出另一条路的结果 —— 与他选的不是一回事。
+            boolean modeSpecified = captureMode != null
+                    && captureMode.length() > 0
+                    && !OCRService.CAPTURE_AUTO.equals(captureMode);
+            boolean ready = modeSpecified
+                    ? service.isCaptureModeReady(captureMode)
+                    : service.isScreenCaptureReady();
+            if (!ready) {
+                String why = modeSpecified
+                        ? "requested capture mode '" + captureMode
+                                + "' is not ready. Please enable it in Grace first."
+                        : "Device has no root; open the app and tap onScreenCapture once "
+                                + "to authorize MediaProjection.";
+                return json("{\"status\": 403, \"data\": \"Error: Screen capture not available. "
+                        + why + "\"}");
+            }
+            Bitmap bitmap;
+            try {
+                bitmap = service.captureByMode(captureMode);
+            } catch (Throwable t) {
+                return json("{\"status\": 500, \"data\": \"Error: Screen capture failed: "
+                        + (t.getMessage() == null ? "unknown" : t.getMessage()) + "\"}");
+            }
+            if (bitmap == null) {
+                return json("{\"status\": 500, \"data\": \"Error: Screen capture returned null\"}");
+            }
+            int w = bitmap.getWidth();
+            int h = bitmap.getHeight();
+            File shot = new File(service.getCacheDir(), "ocr_capture.png");
+            try {
+                FileOutputStream fos = new FileOutputStream(shot);
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos);
+                fos.flush();
+                fos.close();
+            } catch (Exception e) {
+                bitmap.recycle();
+                return json("{\"status\": 500, \"data\": \"Error: cache screenshot failed: "
+                        + e.getMessage() + "\"}");
+            } finally {
+                bitmap.recycle();
+            }
+            // 记下路径与尺寸：界面框选完要按全屏尺寸算比例，
+            // 走这条路比让界面自己去 decode 一张 4K 图取宽高便宜得多。
+            OCRService.lastCapturePath = shot.getAbsolutePath();
+            OCRService.lastFullImageWidth = w;
+            OCRService.lastFullImageHeight = h;
+            Log.i(TAG, "[Shot] 截屏 " + w + "x" + h + " -> " + shot.getAbsolutePath());
+            return json("{\"status\": 200, \"data\": {\"path\":\""
+                    + shot.getAbsolutePath().replace("\\", "\\\\") + "\",\"width\":" + w
+                    + ",\"height\":" + h + "}}");
+        } catch (Throwable t) {
+            Log.e(TAG, "[Shot] 处理失败: " + t.getMessage());
+            return json("{\"status\": 500, \"data\": \"Error: " + t.getMessage() + "\"}");
+        }
+    }
+
+    /**
      * 便捷接口：一步完成「取图 → 识别 → 返回」。
      *
-     * GET /ocr?format=text[&tier=rapid][&path=/sdcard/a.png][&type=1]
+     * GET /ocr?format=text[&tier=rapid][&path=/sdcard/a.png][&type=1][&region=l,t,r,b]
      *
      * 为什么要做这个：
      *   MacroDroid 触发 Locale 插件用的是**普通广播**，
@@ -537,6 +935,22 @@ public class OcrHttpServer extends NanoHTTPD {
             // 3) 识别
             OCRService.lastOcrImageWidth = bitmap.getWidth();
             OCRService.lastOcrImageHeight = bitmap.getHeight();
+            OCRService.lastFullImageWidth = bitmap.getWidth();
+            OCRService.lastFullImageHeight = bitmap.getHeight();
+            OCRService.lastRegionLeft = 0;
+            OCRService.lastRegionTop = 0;
+            // 与 POST / 走同一份裁剪逻辑：只框一块时，别把整屏送进引擎。
+            String regionStr2 = q == null ? null : q.get("region");
+            float[] frac = parseRegion(regionStr2);
+            if (frac != null) {
+                String[] errBox = new String[1];
+                Bitmap cropped = cropByRegion(bitmap, frac, errBox);
+                if (cropped == null) {
+                    bitmap.recycle();
+                    return err(wantText, errBox[0] == null ? "识别区域无效" : errBox[0]);
+                }
+                bitmap = cropped;
+            }
             String result;
             try {
                 // 统一入口：内部按当前档位分流到 native 或 ML Kit（rapid）
@@ -545,6 +959,8 @@ public class OcrHttpServer extends NanoHTTPD {
                 bitmap.recycle();
             }
             if (result == null) return err(wantText, "识别失败");
+            // 坐标从「裁剪块」平移回「全屏」，与 POST / 保持一致。
+            result = shiftCoords(result, OCRService.lastRegionLeft, OCRService.lastRegionTop);
 
             // 4) 顺便存一份（供 /last 用）
             stashFromResult(result);

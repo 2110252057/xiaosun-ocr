@@ -355,6 +355,12 @@ public class PluginFireReceiver extends BroadcastReceiver {
         String path = config.getString(PluginContract.KEY_PATH, "");
         String tier = config.getString(PluginContract.KEY_TIER, null);
         int type = config.getInt(PluginContract.KEY_TYPE, 1);
+        // 是否只用 App 里框好的那块区域。0=整屏（旧配置/默认都走这里）。
+        boolean useRegion = config.getInt(PluginContract.KEY_USE_REGION, 0) >= 1;
+        // 截屏方式：无障碍 / root / 投屏。旧配置没有这个键 → 默认无障碍。
+        // 不再有「自动轮着试」这一档：用户选了哪一种，就只用那一种。
+        String captureMode = config.getString(PluginContract.KEY_CAPTURE,
+                OCRService.CAPTURE_ACCESSIBILITY);
         boolean joinNewline = config.getBoolean(PluginContract.KEY_JOIN_NEWLINE, true);
 vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
 
@@ -410,7 +416,7 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
 
         if (!serverUp) {
             fail(vars, "OCR 服务未能启动。"
-                    + "请检查「小孙OCR」是否被系统限制了后台运行（自启动/省电策略）。");
+                    + "请检查「Grace」是否被系统限制了后台运行（自启动/省电策略）。");
             return;
         }
 
@@ -432,22 +438,26 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
 
         // ---------- 1.5 截屏能力检查（仅「截屏」来源需要） ----------
         // 走「指定图片路径」时不涉及截屏，跳过。
-        if (!PluginContract.SOURCE_PATH.equals(source)
-                && !OCRService.screenCaptureReady) {
-            Log.i(TAG, "尚无截屏能力，尝试申请授权");
+        //
+        // 【2.15 起按「所选的那一条」判断，不再看「有没有任意一条可用」】
+        // 用户选了「Root 截屏」，但设备上只有无障碍可用 —— 那是不可用的：
+        // 服务端会用 root 那条去截（captureByMode 不回退），然后失败。
+        // 所以这里必须针对性地检查，并给出「该启用哪一条」的具体提示。
+        if (!PluginContract.SOURCE_PATH.equals(source)) {
+            // 投屏授权可以由插件自动申请（需悬浮窗权限），其余两种不行，
+            // 所以只有 projection 这一条值得在运行时尝试「自动申请」。
+            if (OCRService.CAPTURE_PROJECTION.equals(captureMode)
+                    && !isCaptureModeReadyStatic(captureMode)) {
+                Log.i(TAG, "投屏授权未就绪，尝试自动申请");
+                requestScreenCaptureIfNeeded(ctx, deadline);
+            }
 
-            boolean ok = requestScreenCaptureIfNeeded(ctx, deadline);
-
-            if (!ok) {
-                fail(vars, "截屏未就绪。三选一："
-                        + "① 在小孙OCR 的「OCR设置」页点「无障碍截图」，"
-                        + "在系统设置里勾选一次（最省事，之后免授权）；"
-                        + "② 有 root 的设备会自动走 screencap；"
-                        + "③ 开启「悬浮窗权限」（插件才能自动申请截屏）"
-                        + "或打开 App 手动点一次「开启截屏授权」。");
+            if (!isCaptureModeReadyStatic(captureMode)) {
+                fail(vars, "所选截屏方式不可用：" + captureModeName(captureMode)
+                        + "。\n" + captureModeFixHint(captureMode));
                 return;
             }
-            Log.i(TAG, "截屏授权完成，继续识别");
+            Log.i(TAG, "截屏方式就绪：" + captureModeName(captureMode));
         }
 
         // ---------- 2. 构造请求 ----------
@@ -467,14 +477,43 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
             }
             // source=screenshot 时不传 path，服务端会自动截屏
             //
-            // ★ 注意：这里**固定用 type=2**（含坐标）请求。
+            // ★ 注意：请求的 type 至少是 2，即使界面选的是「文本」。
             //   原因：坐标变量（x/y）需要引擎返回 x/y 字段，
             //   而 type=1 的响应里根本没有坐标。如果跟着用户选的
-            //   「纯文本」走，坐标就永远是 -1。
-            //   "纯文本 vs 含坐标" 只影响识别文本的拼接样式，
-            //   原始请求统一用 type=2，保证坐标始终可用。
-            body.put("type", type >= 2 ? type : 2);
+            //   「文本」发 1，坐标就永远是 -1。
+            //   所以「文本 / 坐标 / 矩形」只决定**拼接样式**，
+            //   原始请求按「够用就行」的原则取 2 或 3：
+            //     选文本 → 发 2（只要 x/y，不浪费带宽传 w/h）
+            //     选坐标 → 发 2
+            //     选矩形 → 发 3（必须让引擎给 w/h）
+            body.put("type", type >= 3 ? 3 : 2);
             if (tier != null && !tier.isEmpty()) body.put("tier", tier);
+            // 截屏方式：服务端据此**只用这一条**，不可用就报错，不回退。
+            // 走「指定图片路径」时不需要它（用的是那张图，不截屏）。
+            if (!PluginContract.SOURCE_PATH.equals(source)) {
+                body.put("capture", captureMode);
+            }
+
+            // ---------- 识别区域 ----------
+            // 区域存在 App 那边的 OcrRegion（xsocr_prefs / ocr_region），
+            // 和 OcrActivity 的「识别区域」按钮读的是**同一个键**。
+            // 插件不自己存一份，理由见 PluginEditActivity.REGION_MODES 的注释。
+            //
+            // 【取不到时直接失败，不退回整屏】
+            // 用户明确选了「只识别一块区域」，如果这里悄悄退回整屏，
+            // 他会拿到一整屏的文字、坐标还都是全屏的，却以为区域生效了。
+            // 这种"看起来成功、其实错了"的结果比报错难查得多。
+            if (useRegion) {
+                OcrRegion r = OcrRegion.load(ctx);
+                if (r == null) {
+                    fail(vars, "已选「只识别一块区域」，但这台设备上还没有框过区域。"
+                            + "请在这个动作的配置界面点「框选区域…」，"
+                            + "或打开 Grace →「文字识别」→「设区域…」框一块再试。");
+                    return;
+                }
+                body.put("region", r.request());
+                Log.i(TAG, "本次使用识别区域：" + r.percentText());
+            }
         } catch (Throwable t) {
             fail(vars, "构造请求失败: " + t);
             return;
@@ -543,9 +582,19 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
                     // 拼接输出文本
                     if (count > 0) sb.append(sep);
                     if (type >= 2) {
-                        // 含坐标时，把坐标也拼进去（不写文件，只能塞进变量）
-                        sb.append("[").append(item.optInt("x")).append(",")
-                          .append(item.optInt("y")).append("] ").append(text);
+                        // 带坐标时把坐标拼进去（不写文件，只能塞进变量）。
+                        // 格式与服务端 type=2/3 的 JSON 一致：
+                        //   坐标档 [x,y] 文字
+                        //   矩形档 [x,y,w,h] 文字
+                        // 宏里若想「点这行字」，解析出括号里的数字即可：
+                        // 只有 x,y 时最好点 (x+字高/2) 之类，不如矩形档直接算中心。
+                        sb.append("[").append(item.optInt("x", -1)).append(",")
+                          .append(item.optInt("y", -1));
+                        if (type >= 3) {
+                            sb.append(",").append(item.optInt("w", -1)).append(",")
+                              .append(item.optInt("h", -1));
+                        }
+                        sb.append("] ").append(text);
                     } else {
                         sb.append(text);
                     }
@@ -637,6 +686,8 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
             sb.append('|').append(config.getString(PluginContract.KEY_TIER, ""));
             sb.append('|').append(config.getInt(PluginContract.KEY_TYPE, 1));
             sb.append('|').append(config.getBoolean(PluginContract.KEY_JOIN_NEWLINE, true));
+            // 识别区域也要参与指纹：改了「整屏 ⇄ 区域」就是一次新任务。
+            sb.append('|').append(config.getInt(PluginContract.KEY_USE_REGION, 0));
             // 指定文本 + 匹配方式也要参与指纹：改了查找规则，就是一次新任务
             sb.append('|').append(config.getString(PluginContract.KEY_MATCH_TEXT, ""));
             sb.append('|').append(config.getInt(PluginContract.KEY_MATCH_MODE,
@@ -851,6 +902,49 @@ vars.putString(PluginContract.VAR_TIER, tier == null ? "current" : tier);
         // 变量再传不过去，宏侧就成了「什么都没收到」。
         PluginContract.putIntAsString(vars, PluginContract.VAR_X, -1);
         PluginContract.putIntAsString(vars, PluginContract.VAR_Y, -1);
+    }
+
+    /**
+     * 判断某种截屏方式当前是否可用（只用静态标志，拿不到 Service 实例）。
+     *
+     * <p>这些标志由 {@code OCRService.refreshScreenCaptureFlag()} 与
+     * {@code onAccessibilityStateChanged()} 统一回写，是插件侧唯一可靠的来源。
+     */
+    private static boolean isCaptureModeReadyStatic(String mode) {
+        if (OCRService.CAPTURE_ACCESSIBILITY.equals(mode)) {
+            return OCRService.screenCaptureA11yReady;
+        }
+        if (OCRService.CAPTURE_ROOT.equals(mode)) {
+            return OCRService.screenCaptureRootReady;
+        }
+        if (OCRService.CAPTURE_PROJECTION.equals(mode)) {
+            return OCRService.screenCaptureProjectionReady;
+        }
+        return false;
+    }
+
+    /** 给用户看的截屏方式名称。 */
+    private static String captureModeName(String mode) {
+        if (OCRService.CAPTURE_ACCESSIBILITY.equals(mode)) return "无障碍截图";
+        if (OCRService.CAPTURE_ROOT.equals(mode)) return "Root 截屏";
+        if (OCRService.CAPTURE_PROJECTION.equals(mode)) return "投屏授权";
+        return String.valueOf(mode);
+    }
+
+    /** 这条方式不可用时，用户具体该做什么。 */
+    private static String captureModeFixHint(String mode) {
+        if (OCRService.CAPTURE_ACCESSIBILITY.equals(mode)) {
+            return "请打开 Grace →「文字识别」→ 点「无障碍截图」，"
+                    + "在系统设置里勾选「Grace 截图」一次（需 Android 11+）。";
+        }
+        if (OCRService.CAPTURE_ROOT.equals(mode)) {
+            return "请确认这台设备已 root 且已授权；没有 root 就改用「无障碍截图」。";
+        }
+        if (OCRService.CAPTURE_PROJECTION.equals(mode)) {
+            return "请在 Grace 里点一次「开启截屏授权」（服务重启后需要重新授权），"
+                    + "并确认已给 Grace 悬浮窗权限（插件才能自动申请）。";
+        }
+        return "请在 Grace 里配置一种可用的截屏方式。";
     }
 
     /**

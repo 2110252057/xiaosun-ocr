@@ -8,10 +8,68 @@
         <item name="colorOnSurface">@color/text_primary</item>
         <item name="android:colorBackground">@color/bg</item>
         <item name="android:windowBackground">@color/bg</item>
-        <item name="android:statusBarColor">@color/surface</item>
+        <!--
+          状态栏与顶栏同色。
+
+          ★ 2.6 起所有页面的顶栏都改成了页面底色 @color/bg（#F5F6FA），
+          不再有蓝色顶栏。所以状态栏也跟着取 bg —— 整条从状态栏到内容区
+          是同一种浅灰，看不出分段。
+
+          原来这里取的是 @color/brand（品牌蓝），配套白色图标；那个配置
+          是给「蓝顶栏」准备的，顶栏一改浅就变成了「蓝状态栏 + 灰顶栏」，
+          反而更割裂。
+
+          ⚠️ 底色一浅，windowLightStatusBar 必须置 true。
+          它的含义是「状态栏底色是浅色，请把图标画成深色」；
+          置 true 后时钟、电量、信号会画成深灰，在 #F5F6FA 上看得清。
+          （反过来，如果哪天又改回深色底，这个值要记得改回 false。）
+
+          导航栏保持白色 surface：与 #F5F6FA 内容区同属浅色基调，深色图标可见。
+        -->
+        <item name="android:statusBarColor">@color/bg</item>
         <item name="android:navigationBarColor">@color/surface</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
         <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
+    </style>
+
+    <!--
+      全屏框选页（RegionSelectActivity）用的「全黑」主题。
+
+      为什么需要它：这一页要把整张截屏铺满屏幕，让用户直接在屏幕上拖出区域。
+      用 App 的浅色主题会有两个问题：
+        1) 页面底色是浅灰，截图铺不满时（长图两侧留白）露出的浅灰会让人
+           分不清「这里是图外」还是「这里是图里的浅色区域」；
+        2) 状态栏是浅灰 + 深色图标，截图不会盖住它 —— 屏幕上会一直横着
+           一条不属于截图的浅色条，看上去像是能框到、实际点不到。
+
+      所以这里显式声明：
+        · statusBarColor / navigationBarColor 全黑 —— 与页面底色一致，
+          视觉上「这一屏就是那张截图」；
+        · windowLightStatusBar=false —— 黑底必须配白色图标，
+          置 true 会让图标变成深灰，黑底上看不见；
+        · windowBackground 黑 —— 截图解码完成之前是黑屏，
+          比白屏闪一下更像「正在加载」。
+    -->
+    <style name="RegionSelectTheme" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorOnPrimary">@color/text_on_brand</item>
+        <item name="colorSurface">@android:color/black</item>
+        <item name="colorOnSurface">@android:color/white</item>
+        <item name="android:colorBackground">@android:color/black</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <!--
+          状态栏/导航栏必须是**透明**，不是黑色。
+          截图要铺到状态栏下面（这样顶上那条也能框选，不会出现
+          「看着能框、实际点不到」的假区域）。若这里填黑色，系统会在
+          截图之上再画一条黑条，那条区域就点不到了。
+          配合代码里的 WindowCompat.setDecorFitsSystemWindows(false)
+          与底部操作条的 insets 处理一起生效。
+        -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- 透明底上交给截图自己决定明暗，图标用白色在绝大多数截图上更清楚。 -->
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
     </style>
 
     <!--

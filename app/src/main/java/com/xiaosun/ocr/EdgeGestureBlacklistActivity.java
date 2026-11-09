@@ -4,13 +4,10 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,8 +24,10 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
-import java.util.ArrayList;
 import java.util.List;
+
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
  * 手柄黑名单 —— 「哪些应用里不显示手柄」。
@@ -55,16 +54,6 @@ import java.util.List;
  */
 public class EdgeGestureBlacklistActivity extends AppCompatActivity {
 
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_BRAND_SOFT = 0xFFEDF0FE;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_SURFACE = 0xFFFFFFFF;
-    private static final int C_BG = 0xFFF5F6FA;
-    private static final int C_OK = 0xFF12B76A;
-    private static final int C_WARN = 0xFFF79009;
 
     private LinearLayout content;
 
@@ -83,7 +72,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
 
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(16), dp(14), dp(16), dp(40));
+        content.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 40));
         sv.addView(content, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -107,23 +96,35 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(C_BRAND);
-        bar.setPadding(dp(8), dp(14), dp(16), dp(14));
+        bar.setBackgroundColor(C_BG);
+        bar.setPadding(dp(this, 8), dp(this, 14), dp(this, 16), dp(this, 14));
 
         TextView back = new TextView(this);
         back.setText("←");
         back.setTextSize(24);
-        back.setTextColor(Color.WHITE);
+        back.setTextColor(C_TEXT);
         back.setGravity(Gravity.CENTER);
         back.setOnClickListener(v -> finish());
-        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(back, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
+
+        // 两级标题：标明本页属于「边缘手势」，避免被当成顶层功能。
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
 
         TextView title = new TextView(this);
         title.setText("手柄黑名单");
         title.setTextSize(18);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setTextColor(Color.WHITE);
-        bar.addView(title, new LinearLayout.LayoutParams(0,
+        title.setTextColor(C_TEXT);
+        titles.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("边缘手势 · 指定应用里隐藏手柄");
+        sub.setTextSize(11f);
+        sub.setTextColor(C_SUB);
+        titles.addView(sub);
+
+        bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         return bar;
@@ -188,7 +189,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         card.addView(row, wide());
 
         // ---- 名单语义 ----
-        // ★ 分隔线的高度必须写死 dp(1)。
+        // ★ 分隔线的高度必须写死 dp(this, 1)。
         //   这里曾经用 wide()（高度 WRAP_CONTENT）—— 而一个没有内容的
         //   裸 View 在 MeasureSpec.AT_MOST 下的默认尺寸是「铺满可用空间」
         //   （View.getDefaultSize 的 AT_MOST 分支返回 specSize），于是这条
@@ -197,16 +198,16 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         View line = new View(this);
         line.setBackgroundColor(C_DIVIDER);
         LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
-        ll.topMargin = dp(12);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 1));
+        ll.topMargin = dp(this, 12);
         card.addView(line, ll);
 
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
         row2.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams r2l = wide();
-        r2l.topMargin = dp(12);
-        row2.setPadding(0, dp(10), 0, 0);
+        r2l.topMargin = dp(this, 12);
+        row2.setPadding(0, dp(this, 10), 0, 0);
 
         LinearLayout col2 = new LinearLayout(this);
         col2.setOrientation(LinearLayout.VERTICAL);
@@ -247,13 +248,13 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
             b1.setOnClickListener(v -> {
                 try {
                     startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                    toast("在列表里开启「小孙OCR 截图」");
+                    toast("在列表里开启「Grace 截图」");
                 } catch (Throwable t2ex) {
                     toast("请到系统设置 → 无障碍 里开启");
                 }
             });
             LinearLayout.LayoutParams b1l = wide();
-            b1l.topMargin = dp(12);
+            b1l.topMargin = dp(this, 12);
             card.addView(b1, b1l);
         }
 
@@ -286,10 +287,10 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         add.setText("＋ 添加应用");
         add.setTextSize(13);
         add.setTextColor(C_BRAND);
-        add.setPadding(dp(12), dp(6), dp(12), dp(6));
+        add.setPadding(dp(this, 12), dp(this, 6), dp(this, 12), dp(this, 6));
         GradientDrawable ab = new GradientDrawable();
         ab.setColor(C_BRAND_SOFT);
-        ab.setCornerRadius(dp(8));
+        ab.setCornerRadius(dp(this, 8));
         add.setBackground(ab);
         add.setOnClickListener(v -> showAddDialog());
         head.addView(add);
@@ -303,7 +304,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
             empty.setLineSpacing(0f, 1.35f);
             empty.setText("名单是空的。点右上角「添加应用」把想屏蔽的应用加进来。");
             LinearLayout.LayoutParams el = wide();
-            el.topMargin = dp(12);
+            el.topMargin = dp(this, 12);
             card.addView(empty, el);
         }
 
@@ -313,7 +314,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
             View line = new View(this);
             line.setBackgroundColor(C_DIVIDER);
             card.addView(line, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 1)));
         }
 
         content.addView(card, cardLp());
@@ -323,11 +324,11 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(11), 0, dp(11));
+        row.setPadding(0, dp(this, 11), 0, dp(this, 11));
 
         ImageView icon = new ImageView(this);
-        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(dp(36), dp(36));
-        il.rightMargin = dp(12);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(dp(this, 36), dp(this, 36));
+        il.rightMargin = dp(this, 12);
         row.addView(icon, il);
         Drawable d = MenuIcons.load(this, "app:" + pkg);
         if (d != null) {
@@ -336,7 +337,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
             // 图标取不到（应用已卸载）就画一个灰方块，别留空洞
             GradientDrawable g = new GradientDrawable();
             g.setColor(C_DIVIDER);
-            g.setCornerRadius(dp(8));
+            g.setCornerRadius(dp(this, 8));
             icon.setBackground(g);
         }
 
@@ -362,7 +363,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         del.setText("移除");
         del.setTextSize(12.5f);
         del.setTextColor(0xFFE5484D);
-        del.setPadding(dp(10), dp(6), dp(4), dp(6));
+        del.setPadding(dp(this, 10), dp(this, 6), dp(this, 4), dp(this, 6));
         del.setOnClickListener(v -> {
             EdgeGesturePrefs.removeBlacklist(this, pkg);
             // 立刻让手柄按新名单重新判定，不用等用户返回上一页
@@ -399,8 +400,8 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(12);
-        box.setPadding(pad, dp(6), pad, 0);
+        int pad = dp(this, 12);
+        box.setPadding(pad, dp(this, 6), pad, 0);
 
         final EditText search = new EditText(this);
         search.setHint("搜索应用名 / 包名");
@@ -415,7 +416,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         sv.addView(listBox, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(360));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 360));
         box.addView(sv, sl);
 
         final AlertDialog dialog = new AlertDialog.Builder(this)
@@ -444,7 +445,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
                 TextView empty = new TextView(this);
                 empty.setTextSize(13);
                 empty.setTextColor(C_HINT);
-                empty.setPadding(dp(4), dp(20), dp(4), dp(20));
+                empty.setPadding(dp(this, 4), dp(this, 20), dp(this, 4), dp(this, 20));
                 empty.setGravity(Gravity.CENTER);
                 empty.setText(all.isEmpty() ? "没有可见的应用（检查包可见性权限）" : "没有匹配的应用");
                 listBox.addView(empty, wide());
@@ -467,11 +468,11 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(2), dp(9), dp(2), dp(9));
+        row.setPadding(dp(this, 2), dp(this, 9), dp(this, 2), dp(this, 9));
 
         ImageView icon = new ImageView(this);
-        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(dp(32), dp(32));
-        il.rightMargin = dp(12);
+        LinearLayout.LayoutParams il = new LinearLayout.LayoutParams(dp(this, 32), dp(this, 32));
+        il.rightMargin = dp(this, 12);
         row.addView(icon, il);
         Drawable d = MenuIcons.load(this, "app:" + e.pkg);
         if (d != null) icon.setImageDrawable(d);
@@ -499,7 +500,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         mark.setText(already ? "已在名单" : "添加");
         mark.setTextSize(12.5f);
         mark.setTextColor(already ? C_HINT : C_BRAND);
-        mark.setPadding(dp(10), dp(6), dp(4), dp(6));
+        mark.setPadding(dp(this, 10), dp(this, 6), dp(this, 4), dp(this, 6));
         row.addView(mark);
 
         if (!already) {
@@ -522,15 +523,15 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
     private LinearLayout card() {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        c.setPadding(dp(16), dp(14), dp(16), dp(14));
-        c.setElevation(dp(1));
+        c.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 14));
+        c.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        c.setElevation(dp(this, 1));
         return c;
     }
 
     private LinearLayout.LayoutParams cardLp() {
         LinearLayout.LayoutParams lp = wide();
-        lp.bottomMargin = dp(12);
+        lp.bottomMargin = dp(this, 12);
         return lp;
     }
 
@@ -551,7 +552,7 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         b.setTextSize(13.5f);
         GradientDrawable g = new GradientDrawable();
         g.setColor(C_BRAND);
-        g.setCornerRadius(dp(10));
+        g.setCornerRadius(dp(this, 10));
         b.setBackground(g);
         return b;
     }
@@ -564,30 +565,12 @@ public class EdgeGestureBlacklistActivity extends AppCompatActivity {
         b.setTextSize(13f);
         GradientDrawable g = new GradientDrawable();
         g.setColor(C_BRAND_SOFT);
-        g.setCornerRadius(dp(10));
+        g.setCornerRadius(dp(this, 10));
         b.setBackground(g);
         return b;
     }
 
-    private GradientDrawable borderedBg(int fill, int stroke, float radiusDp) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(fill);
-        g.setCornerRadius(dp(radiusDp));
-        g.setStroke(dp(1), stroke);
-        return g;
-    }
-
-    private LinearLayout.LayoutParams wide() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
-    }
-
-    private void toast(String msg) {
+                private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
 

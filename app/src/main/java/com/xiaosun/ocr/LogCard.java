@@ -57,10 +57,23 @@ final class LogCard {
      *               —— 宿主的常用开关在上面，日志这种排障功能垫底。
      */
     static View buildMenuButton(final Activity a, final MenuItem... extras) {
+        return buildMenuButton(a, Color.WHITE, extras);
+    }
+
+    /**
+     * 同上，但可指定图标颜色。
+     *
+     * <p>「⋮」原本固定白色 —— 它一直待在品牌蓝的顶栏上，白字没问题。
+     * 首页顶栏改成浅灰底（与内容区同色）后，白字在白底上等于消失，
+     * 所以颜色必须由宿主传进来。其它页面仍是蓝顶栏，继续用白字。
+     *
+     * @param tint 图标颜色
+     */
+    static View buildMenuButton(final Activity a, final int tint, final MenuItem... extras) {
         TextView more = new TextView(a);
         more.setText("⋮");
         more.setTextSize(22);
-        more.setTextColor(Color.WHITE);
+        more.setTextColor(tint);
         more.setGravity(Gravity.CENTER);
         more.setContentDescription("更多");
         more.setOnClickListener(v -> showMoreMenu(a, extras));
@@ -133,7 +146,7 @@ final class LogCard {
                             break;
                         case 1: {
                             // 带上设备信息一起发 —— 排障第一问永远是「什么机型、什么系统」
-                            String extra = "小孙OCR 日志\n\n" + AppLog.deviceInfo(a);
+                            String extra = "Grace 日志\n\n" + AppLog.deviceInfo(a);
                             if (AppLog.share(a, extra)) {
                                 toast(a, "选择要发送到的应用");
                             } else {

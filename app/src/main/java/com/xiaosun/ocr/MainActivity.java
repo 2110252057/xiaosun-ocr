@@ -4,32 +4,18 @@ import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
-import android.text.Editable;
-import android.text.TextWatcher;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -38,143 +24,41 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
- * 主界面。
+ * 首页 —— 功能入口列表。
  *
- * 打开 App 自动拉起本地 OCR 服务（端口见 {@link OCRService#HTTP_PORT}）。
- * 两个页签：OCR设置 / 滑动触发
- *
- * 调试页：选中图片直接在预览框显示，识别后把检测框画在预览图上，
- * 结果区按所选格式显示（纯文本时只输出文字本身）。
+ * 页面结构：顶部标题栏 + 单列功能卡片。
+ * 每张卡只有「图标 + 功能名 + ›」，没有状态小字、没有介绍文字。
+ * 点进去是独立的二级页，返回回到这里。
  */
 public class MainActivity extends AppCompatActivity {
 
-    // 版本号不再硬编码：直接取 app/build.gradle 中 defaultConfig 声明的 versionName。
-    // 从此版本号只有一个来源，不可能再出现多处不一致。
     private static final String APP_VERSION = "v" + BuildConfig.VERSION_NAME;
-    // 【修复⑪】本机接口地址不再硬编码端口：直接复用 Http.URL_BASE，
-    // 而 Http.URL_BASE 又由 OCRService.HTTP_PORT 拼出。
-    // 于是"服务实际监听端口 / 通知栏文案 / 界面文档 / 客户端请求"四处
-    // 全部来自同一个常量，改端口只改一处。
-    private static final String LOCAL_URL = Http.URL_BASE;
-    /**
-     * 无障碍服务在系统「无障碍」列表里的显示名。
+
+
+    /** 首页内容容器。 */
+    private LinearLayout content;
+
+    /*
+     * 【整块轮询已删除】原先这里有 featureSubs[]（每张卡的状态文字控件）
+     * 和一个 1.5 秒的 Handler 轮询，用来在用户停留在首页时把「模型加载中 →
+     * 服务就绪」这类跳变刷出来。
      *
-     * 必须与 strings.xml 的 a11y_service_name 一字不差 ——
-     * 引导用户去勾选时，文案里出现的就是这个名字，对不上他就找不到。
+     * 卡片上不再显示状态文字之后，屏幕里没有任何东西会变 —— 轮询纯属白跑
+     * （首页是常开页面，一直挂着就是一直醒）。所以 ticker / tick / refreshAll
+     * / featureSubs 以及四个 xxxState() 取值器全部删除。
      */
-    private static final String A11Y_LABEL = "小孙OCR 截图";
-    private static final int REQ_PICK_IMAGE = 1001;
-    private static final int REQ_SCREEN_CAPTURE = 1002;
-
-    // ---- 设计规范 ----
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_BRAND_DARK = 0xFF3B54C4;
-    private static final int C_BRAND_SOFT = 0xFFEDF0FE;
-    private static final int C_BG = 0xFFF5F6FA;
-    private static final int C_SURFACE = 0xFFFFFFFF;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_TEXT_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_OK = 0xFF12B76A;
-    private static final int C_WARN = 0xFFF79009;
-    private static final int C_CODE_BG = 0xFF1E2029;
-    private static final int C_CODE_TEXT = 0xFFC8D0E0;
-
-    /**
-     * 页签列表。
-     *
-     * 【为什么只剩两个】
-     * 原来第一页是「接口文档」（HTTP 接口的参数表 + 多语言调用示例），
-     * 第二页是「在线调试」（开关、状态、保活、截屏、图片预览）。
-     * 但宏早就可以直接在 MacroDroid 里选插件配置，照着文档手写 HTTP 调用
-     * 这条路已经没人走了 —— 文档页从此只是占地方。
-     * 于是文档页整页删除，它上面唯一仍然有用的「总开关」搬到调试页，
-     * 两页合并成一页，改名叫「OCR设置」。
-     */
-    private final String[] tabs = {"OCR设置", "滑动触发"};
-    private LinearLayout contentContainer;
-    // 长度跟随 tabs，避免以后加页签时数组越界。
-    private final View[] tabViews = new View[tabs.length];
-    private final TextView[] tabTexts = new TextView[tabs.length];
-    /** 「滑动触发」页的状态文字（服务未运行时为 null）。 */
-    private TextView tvGestureState;
-    /**
-     * 「滑动菜单」卡片右侧那行状态文案。
-     *
-     * 提成成员是因为它需要能单独刷新：用户在菜单配置页里开关了菜单、
-     * 增删了菜单项，返回本页时这行字必须跟着变，否则显示的还是进来时那次
-     * 的快照（"未启用"却其实已启用）。
-     */
-    private TextView tvMenuSub;
-
-    private TextView tvStatusDot;
-    private TextView tvStatusText;
-    /** 状态卡副标题（接口地址）。关闭时它不该继续显示一个没人监听的地址。 */
-    private TextView tvStatusSub;
-    /** 保活提示行：未加入电池优化白名单时才显示。 */
-    private TextView tvBatteryText;
-    private boolean serviceStarting = false;
-    /**
-     * 「手势正在启动…」状态的重试计数与开关。
-     *
-     * 服务的 gsRunning 是在 onStartCommand（主线程）里翻的，
-     * 而页面构建几乎总发生在它之前，所以刚进这一页看到的必然是「正在启动…」。
-     * 留几次重试让它自己变成「运行中」，否则用户会以为服务根本没起来。
-     * 具体计数放在延迟任务自己身上，这里只需要一个「是否已有链在排」的标志。
-     */
-    private boolean gestureRecheckPending = false;
-    /** 延迟刷新状态用的 Handler。 */
-    private android.os.Handler gestureRecheckHandler;
-    /** 重试间隔与次数：12 × 500ms = 6 秒，足够系统把服务拉起来。 */
-    private static final int GESTURE_RECHECK_MAX = 12;
-    private static final int GESTURE_RECHECK_INTERVAL = 500;
-
-    // 调试页状态
-    private ImageView previewImage;
-    private TextView previewPlaceholder;
-    private TextView tvPreviewInfo;
-    private Bitmap previewBitmap;
-    private String currentPath = "";
-    private TextView tvResult;
-    private Spinner formatSpinner;
-    private EditText etPath;
-
-    /** 模型档位选择器与说明文字。 */
-    private Spinner tierSpinner;
-    private TextView tierInfo;
-    private boolean tierSwitching = false;
-
-    /** 档位显示名（索引与 OCRService.TIER_* 对应）。 */
-    private static final String[] TIER_LABELS = {
-            "tiny · 轻量（快）",
-            "small · 高精度",
-            "rapid · ML Kit（最快）",
-    };
-
-    /** 屏幕截图授权是否已就绪。 */
-    private boolean captureReady = false;
-    private TextView capInfo;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // 装日志（幂等）。最先装 —— 后面任何一步崩了都能留下堆栈。
+        // 日志最先装：后面任何一步崩了都能留下堆栈。
         AppLog.install(this);
-
-        // 把「从最近任务隐藏」对齐到设置值。
-        // AppTask.setExcludeFromRecents 是就地生效的，不会重建界面。
+        // 把「从最近任务隐藏」对齐到设置值（就地生效，不重建界面）。
         OCRService.applyRecents(this);
 
         requestPermissionsIfNeeded();
@@ -183,738 +67,219 @@ public class MainActivity extends AppCompatActivity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(C_BG);
 
-        root.addView(buildTopBar());
-        root.addView(buildSegmentedTabs());
+        root.addView(buildHeader());
 
-        ScrollView scrollView = new ScrollView(this);
-        scrollView.setClipToPadding(false);
-        scrollView.setPadding(0, dp(4), 0, 0);
-        contentContainer = new LinearLayout(this);
-        contentContainer.setOrientation(LinearLayout.VERTICAL);
-        contentContainer.setPadding(dp(16), dp(8), dp(16), dp(32));
-        scrollView.addView(contentContainer);
-        root.addView(scrollView, new LinearLayout.LayoutParams(
+        ScrollView sv = new ScrollView(this);
+        sv.setClipToPadding(false);
+        content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(this, 16), dp(this, 4), dp(this, 16), dp(this, 32));
+        sv.addView(content, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(sv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
-        switchTab(0);
-        ensureServiceRunning();
+
+        applyStatusBar();
+
+        buildFeatureGrid();
+
+        // OCR 服务按总开关自动拉起（关掉的人不该被强行载入模型）。
+        ensureOcrService();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        ensureServiceRunning();
-        // 回到前台刷新截屏方式（root 探测在服务里异步完成）
-        refreshCaptureMode();
-        /*
-         * 手势服务在这里再主动拉一次。
-         *
-         * 光靠 START_STICKY 不够：服务被系统重启过一次之后
-         * （dumpsys 里 restartCount=1、lastActivity==restartTime），
-         * 就再也没有任何代码主动拉过它，手柄也就一直不出现。
-         * sync() 会按总开关决定起还是停，是幂等的。
-         */
-        EdgeGestureService.sync(this);
-        // 回前台时对齐一次「从最近任务隐藏」：可能是别的入口改了设置，
-        // 也可能系统重建过 task，重设一遍最稳（值相同时是空操作）。
+        // 「从最近任务隐藏」可能被别的入口改过，重设一遍最稳（值相同是空操作）。
         OCRService.applyRecents(this);
-        // 从手势设置页返回、或刚被划掉后重新进来时，开关/权限/运行状态可能都变了。
-        refreshGestureState();
-        // 「滑动菜单」的开关与项数是在子页里改的，返回本页必须重读，
-        // 否则卡片上还写着进来时那次的旧状态。
-        refreshMenuCard();
-        /*
-         * 保活状态也可能在这次离开期间变了：用户可能刚去系统设置里把本应用
-         * 加进电池优化白名单，也可能在「⋮」菜单里切了「从最近任务隐藏」。
-         * ensureServiceRunning() 在本页早已运行时是直接 return 的，不会
-         * 顺手刷新；所以这里必须显式刷一次，否则那条「⚠ 未加入白名单」的
-         * 警示行会一直挂在已加白的机器上。（refreshStatus 里全是 null 检查，
-         * 页面还没建好时调也安全，重复调是幂等的。）
-         */
-        refreshStatus();
-    }
-
-    /**
-     * 等服务的截屏能力就绪后刷新界面文案。
-     *
-     * 不能用固定延时：服务的 root 探测里有 `su -c id`（首次会弹授权框，
-     * 超时上限 20s）和一次试拍，慢设备上远超 1 秒。
-     * 固定 1200ms 会导致界面显示"未授权"，而服务里其实已经可用，误导用户。
-     */
-    private void refreshCaptureMode() {
-        final android.os.Handler h = new android.os.Handler(getMainLooper());
-        final int[] tries = {0};
-        final int maxTries = 60;      // 60 × 250ms = 最多等 15s
-        Runnable poll = new Runnable() {
-            @Override
-            public void run() {
-                // 无障碍是进程内实时状态，不必等服务的静态标志同步
-                boolean ready = OCRService.screenCaptureReady
-                        || OcrAccessibilityService.isReady();
-                captureReady = ready;
-                updateCaptureInfo();
-                // 已就绪，或已重试到上限（避免无限轮询）就停下
-                if (!ready && ++tries[0] < maxTries) {
-                    h.postDelayed(this, 250);
-                }
-            }
-        };
-        h.postDelayed(poll, 250);
-    }
-
-    /** 主动检测 root 截屏（服务已在启动时自动探测，这里给一个手动入口）。 */
-    private void probeRootCapture() {
-        toast("正在检测 root 截屏…");
-        new Thread(() -> {
-            boolean rootOk = RootScreenCaptureManager.isRootAvailable();
-            boolean using = OCRService.screenCaptureReady && "root".equals(OCRService.captureMode);
-            runOnUiThread(() -> {
-                captureReady = OCRService.screenCaptureReady;
-                updateCaptureInfo();
-                if (using) {
-                    toast("root 截屏可用，已免去截屏授权");
-                } else if (rootOk) {
-                    toast("检测到 root，但截屏初始化失败，请查看日志");
-                } else {
-                    toast("未检测到 root，请改用「开启截屏授权」");
-                }
-            });
-        }, "xsocr-root-probe").start();
+        ensureOcrService();
+        // 手势服务被系统重启过之后就再没人拉过它，这里按总开关幂等地同步一次。
+        EdgeGestureService.sync(this);
     }
 
     // ============================================================
     //  顶部栏
     // ============================================================
 
-    private View buildTopBar() {
+    /**
+     * 首页的状态栏与顶栏保持同一个底色 C_BG。
+     *
+     * <p>【2.6 起这里只剩一件事：关掉对比度遮罩】
+     * 状态栏颜色与图标明暗已统一写在主题（{@code @color/bg} +
+     * {@code windowLightStatusBar=true}），所有页面共用一套，不必每页各设一遍。
+     *
+     * <p>但主题管不到 {@code setStatusBarContrastEnforced} —— Android 10+
+     * 会给浅色状态栏自动压一层灰色蒙版，让状态栏比下面的顶栏暗一档，
+     * 又出现一道「缝」。这个只能在运行时关。
+     */
+    private void applyStatusBar() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().setStatusBarContrastEnforced(false);
+        }
+    }
+
+    private View buildHeader() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackground(brandGradient());
-        bar.setPadding(dp(20), dp(20), dp(20), dp(20));
+        /*
+         * 顶栏不再是品牌蓝，直接用页面底色 C_BG —— 与下面内容区同色。
+         *
+         * 原先这里是 C_BRAND → C_BRAND_DARK 的竖向渐变，靠一块深色块把标题压住。
+         * 现在整页只剩「标题 + 四行功能」，蓝色块反而把第一张卡往下推、
+         * 又和浅灰内容分成两截；同样的底色让标题看起来是「印在页面上」的，
+         * 而不是另一块贴上去的条。
+         *
+         * 【连带改动】底色一变浅，原先为蓝底准备的白色文字全部改用深色：
+         * 标题 C_TEXT、副标题 C_SUB、Logo 反过来改成蓝底白字、
+         * 「⋮」也换成深灰（见下面 LogCard.buildMenuButton 的颜色参数）。
+         * 状态栏颜色在 applyStatusBar() 里单独对齐，见那里的说明。
+         */
+        bar.setBackgroundColor(C_BG);
+        bar.setPadding(dp(this, 20), dp(this, 20), dp(this, 16), dp(this, 14));
 
+        // 圆形 Logo：一个字母足够，避免再塞一张位图资源。
+        // 蓝底白字（原来在蓝顶栏上是白底蓝字，反过来了）。
         TextView logo = new TextView(this);
-        logo.setText("A");
-        logo.setTextSize(20);
+        logo.setText("G");
+        logo.setTextSize(21);
         logo.setTypeface(null, Typeface.BOLD);
-        logo.setTextColor(C_BRAND);
+        logo.setTextColor(Color.WHITE);
         logo.setGravity(Gravity.CENTER);
         GradientDrawable logoBg = new GradientDrawable();
-        logoBg.setColor(Color.WHITE);
-        logoBg.setCornerRadius(dp(12));
+        logoBg.setColor(C_BRAND);
+        logoBg.setShape(GradientDrawable.OVAL);
         logo.setBackground(logoBg);
-        LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(dp(44), dp(44));
-        logoLp.setMarginEnd(dp(14));
+        LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(dp(this, 46), dp(this, 46));
+        logoLp.setMarginEnd(dp(this, 14));
         bar.addView(logo, logoLp);
 
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("小孙OCR");
-        title.setTextSize(21);
+        title.setText("Grace");
+        title.setTextSize(22);
         title.setTypeface(null, Typeface.BOLD);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(C_TEXT);
         title.setLetterSpacing(0.02f);
         column.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("PaddleOCR v6 · NCNN 本地识别  " + APP_VERSION);
+        sub.setText("本地文字识别 · 手势自动化  " + APP_VERSION);
         sub.setTextSize(11.5f);
-        sub.setTextColor(0xCCFFFFFF);
+        sub.setTextColor(C_SUB);
         column.addView(sub);
+
         bar.addView(column, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // 右上角「⋮」：日志 + 隐藏任务 + 保活。
-        // 后两项是「配一次就不动」的设置，页面里不再占卡片。
-        View more = LogCard.buildMenuButton(this,
-                // 传 Title 而不是 String：菜单每次打开都要现算状态，
-                // 否则切完「从最近任务隐藏」再打开菜单，看到的还是旧文案。
+        // 右上角「⋮」：日志 + 两个「配一次就不动」的开关
+        // 第三个参数是图标颜色：浅底上必须给深灰，默认的白色会完全看不见。
+        View more = LogCard.buildMenuButton(this, C_SUB,
                 new LogCard.MenuItem(this::recentsMenuTitle, this::toggleHideFromRecents),
                 new LogCard.MenuItem(this::keepAliveMenuTitle, this::openBatteryWhitelist));
-        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(dp(40), dp(40));
-        bar.addView(more, moreLp);
+        bar.addView(more, new LinearLayout.LayoutParams(dp(this, 40), dp(this, 40)));
 
         return bar;
     }
 
-    private GradientDrawable brandGradient() {
-        GradientDrawable g = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR, new int[]{C_BRAND, C_BRAND_DARK});
-        g.setCornerRadius(0f);
-        return g;
-    }
-
-    // ============================================================
-    //  分段式页签
+// ============================================================
+    //  功能卡片（一列，一行一个）
     // ============================================================
 
-    private View buildSegmentedTabs() {
-        LinearLayout wrapper = new LinearLayout(this);
-        wrapper.setOrientation(LinearLayout.HORIZONTAL);
-        wrapper.setBackgroundColor(C_SURFACE);
-        wrapper.setPadding(dp(16), dp(12), dp(16), dp(12));
+    private void buildFeatureGrid() {
+        addSectionTitle(content, "功能");
 
-        LinearLayout seg = new LinearLayout(this);
-        seg.setOrientation(LinearLayout.HORIZONTAL);
-        GradientDrawable segBg = new GradientDrawable();
-        segBg.setColor(C_BG);
-        segBg.setCornerRadius(dp(12));
-        seg.setBackground(segBg);
-        seg.setPadding(dp(4), dp(4), dp(4), dp(4));
-
-        for (int i = 0; i < tabs.length; i++) {
-            final int index = i;
-
-            LinearLayout item = new LinearLayout(this);
-            item.setGravity(Gravity.CENTER);
-            item.setPadding(0, dp(9), 0, dp(9));
-
-            TextView tv = new TextView(this);
-            tv.setText(tabs[i]);
-            tv.setTextSize(13.5f);
-            tv.setGravity(Gravity.CENTER);
-            item.addView(tv);
-
-            item.setOnClickListener(v -> switchTab(index));
-
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            seg.addView(item, lp);
-
-            tabViews[i] = item;
-            tabTexts[i] = tv;
-        }
-
-        wrapper.addView(seg, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        LinearLayout outer = new LinearLayout(this);
-        outer.setOrientation(LinearLayout.VERTICAL);
-        outer.setBackgroundColor(C_SURFACE);
-        outer.addView(wrapper);
-        View line = new View(this);
-        line.setBackgroundColor(C_DIVIDER);
-        outer.addView(line, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
-        return outer;
-    }
-
-    private void switchTab(int index) {
-        for (int i = 0; i < tabViews.length; i++) {
-            boolean active = (i == index);
-            tabViews[i].setBackground(active ? roundedBg(C_SURFACE, 9) : transparentBg());
-            tabViews[i].setElevation(active ? dp(2) : 0);
-            tabTexts[i].setTextColor(active ? C_BRAND : C_TEXT_SUB);
-            tabTexts[i].setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
-        }
-
-        contentContainer.removeAllViews();
-        tvStatusDot = null;
-        tvStatusText = null;
-        tvStatusSub = null;
-        tvBatteryText = null;
-        previewImage = null;
-        previewPlaceholder = null;
-        tvPreviewInfo = null;
-        tvResult = null;
-        formatSpinner = null;
-        etPath = null;
-        tierSpinner = null;
-        tierInfo = null;
-        // 切页时把还排着的状态重试链掐掉：旧页面马上就不存在了，重试没有意义。
-        cancelGestureRecheck();
-        tvGestureState = null;
-        tvMenuSub = null;
-        if (index == 0) {
-            buildOcrSettingsPage(contentContainer);
-        } else {
-            buildGestureCard(contentContainer);
-        }
-        refreshStatus();
-    }
-
-    private GradientDrawable roundedBg(int color, float radiusDp) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(color);
-        d.setCornerRadius(dp(radiusDp));
-        return d;
-    }
-
-    private GradientDrawable transparentBg() {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(Color.TRANSPARENT);
-        return d;
-    }
-
-    // ============================================================
-    //  服务状态
-    // ============================================================
-
-    private void ensureServiceRunning() {
-        // 开关关了就不主动拉起 —— 这正是「只用滑动手势」的人要的：
-        // 打开 App 不再顺带把他不用的 OCR 服务和模型载进内存。
-        if (!OCRService.isEnabled(this)) {
-            return;
-        }
-        if (OCRService.isRunning || serviceStarting) {
-            return;
-        }
-        try {
-            Intent intent = new Intent(this, OCRService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent);
-            } else {
-                startService(intent);
-            }
-            serviceStarting = true;
-            new android.os.Handler(getMainLooper()).postDelayed(() -> {
-                serviceStarting = false;
-                refreshStatus();
-            }, 4000);
-        } catch (Exception e) {
-            toast("服务启动失败: " + e.getMessage());
-        }
-        refreshStatus();
-    }
-
-    /**
-     * 开关没开时给一句明确提示。
-     *
-     * 【为什么需要它】
-     * 关闭开关后，{@link #ensureServiceRunning()} 会直接返回（这是有意的），
-     * 于是所有依赖本地接口的操作都会以「连接失败」收场 ——
-     * 用户看到的是网络错误，根本想不到是自己在设置里关掉了服务。
-     * 这种「静默失败」最难自查，所以入口处一律先拦一次、说清原因。
-     *
-     * @return true 表示服务可用、可以继续；false 表示已提示并应中止。
-     */
-    private boolean warnIfOcrDisabled() {
-        if (OCRService.isEnabled(this)) {
-            return true;
-        }
-        toast("OCR 服务已在设置里关闭 —— 先打开「启用 OCR 服务」");
-        return false;
-    }
-
-    private void refreshStatus() {
-        boolean enabled = OCRService.isEnabled(this);
-        boolean ready = OCRService.isRunning;
-        if (tvStatusDot != null) {
-            // 只有「开着且真的跑起来了」才是绿点；
-            // 关闭状态和一个正在加载的黄点视觉上就不该混淆。
-            tvStatusDot.setBackgroundResource(
-                    enabled && ready ? R.drawable.dot_ok : R.drawable.dot_warn);
-        }
-        if (tvStatusText != null) {
-            if (!enabled) {
-                tvStatusText.setText("服务已关闭");
-                tvStatusText.setTextColor(C_TEXT_SUB);
-            } else {
-                tvStatusText.setText(ready ? "服务已就绪" : "正在加载模型…");
-                tvStatusText.setTextColor(ready ? C_TEXT : C_TEXT_SUB);
-            }
-        }
-        if (tvStatusSub != null) {
-            // 关闭时不能继续显示接口地址：那个端口已经没人监听，
-            // 用户照着它去调只会拿到「连接被拒」，还以为是服务坏了。
-            tvStatusSub.setText(enabled ? LOCAL_URL : "接口未监听");
-        }
-        if (tvBatteryText != null) {
-            // 只在「没进白名单」时才露出来。
-            // 进了白名单就没什么好说的了，留着只是占地方；
-            // 而没进白名单时 Android 会随时冻结后台进程，表现为
-            // 「服务莫名停止」—— 这一条必须让用户看见。
-            boolean ok = isIgnoringBatteryOptimizations();
-            tvBatteryText.setText("⚠ 未加入电池优化白名单，后台可能被冻结。点这里去设置。");
-            tvBatteryText.setTextColor(C_WARN);
-            tvBatteryText.setVisibility(ok ? View.GONE : View.VISIBLE);
-        }
-    }
-
-    // ============================================================
-    //  滑动触发页（入口）
-    // ============================================================
-    /**
-     * 「边缘滑动手势」入口卡 —— 「滑动触发」页的第一张。
-     *
-     * 整页放在主界面而不是藏进二级菜单，是因为这个功能需要「随手开随手关」：
-     * 手势引擎开着时会常驻一个悬浮窗，用户得能一眼看到它是否在运行。
-     *
-     * ════════════════════════════════════════════════════════════════
-     * 【为什么不再有两个按钮】
-     * ════════════════════════════════════════════════════════════════
-     * 原先卡片下面并排两个按钮：「打开手势设置」和「去启用」。
-     * 但「去启用」的逻辑是 —— 没开就开、开了就跳设置页，也就是说
-     * 它最终做的事和「打开手势设置」是同一件。两个按钮干一件事，
-     * 用户站在那儿得先想「我该点哪个」。
-     *
-     * 现在整张卡就是一个入口，右侧一个「›」，底下那行小字写清状态，
-     * 与下方的「滑动菜单」卡完全一致 —— 两处相邻的东西长得一样，
-     * 才不会让人以为一个是开关、一个是页面。
-     *
-     * 点一下照样能顺手打开总开关（见 {@link #onGestureCardTap()}）：
-     * 没开就开，开了就进设置页调参数。这和原「去启用」的判断一致，
-     * 只是不再单独占一个按钮。
-     */
-    private void buildGestureCard(ViewGroup parent) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setElevation(dp(1));
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        TextView t = new TextView(this);
-        t.setText("边缘滑动手势");
-        t.setTextSize(14.5f);
-        t.setTypeface(null, Typeface.BOLD);
-        t.setTextColor(C_TEXT);
-        col.addView(t);
-
-        TextView sub = new TextView(this);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(C_HINT);
-        sub.setLineSpacing(0f, 1.35f);
-        tvGestureState = sub;
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(3);
-        col.addView(sub, sl);
-
-        row.addView(col, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView arrow = new TextView(this);
-        arrow.setText("›");
-        arrow.setTextSize(20);
-        arrow.setTextColor(C_HINT);
-        arrow.setPadding(dp(8), 0, 0, 0);
-        row.addView(arrow);
-
-        row.setOnClickListener(v -> onGestureCardTap());
-        card.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        // 说明文字只在卡片下方留一行，不占按钮位。
-        TextView desc = new TextView(this);
-        desc.setText("屏幕边缘的手柄，滑一下即触发，支持 8 个方向。");
-        desc.setTextSize(12f);
-        desc.setTextColor(C_HINT);
-        desc.setLineSpacing(dp(3), 1f);
-        LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        descLp.topMargin = dp(10);
-        card.addView(desc, descLp);
-
-        parent.addView(card, cardLp());
-
-        // 菜单是「手势的产物」，跟手柄、触发距离是一回事，所以放在这一页；
-        // 早先挂在「手势设置」二级页里，得点进去才找得到。
-        buildMenuCard(parent);
-
-        refreshGestureState();
-    }
-
-    /**
-     * 点手势卡：没开就开，开了就进设置页。
-     *
-     * 这是原「去启用」按钮的判断逻辑，原样保留 —— 它其实是两种意图的
-     * 合并：用户点这张卡，要么是想开（那就开），要么是想调（那就进页面）。
-     * 既然「已经开着」时开这个动作没有意义，直接进设置页就是他要的下一个
-     * 动作，不用再问他一遍。
-     */
-    private void onGestureCardTap() {
-        if (!EdgeGesturePrefs.isEnabled(this)) {
-            EdgeGesturePrefs.setEnabled(this, true);
-            // 开关只是写进 Prefs，服务还不会自己动 ——
-            // 这里补一次 sync()，否则用户点完看到「已开启」却没有任何手柄。
-            EdgeGestureService.sync(this);
-            toast("已启用边缘滑动触发");
-            refreshGestureState();
-        } else {
-            EdgeGestureActivity.open(this);
+        Feature[] list = features();
+        /*
+         * 一列排布：一个功能占满一整行。
+         *
+         * 原先是两列网格（每行两张半宽卡）。改成单列的原因：
+         * 卡上的说明文字（「截屏或选图，本地识别中英文」这类）在半宽卡里
+         * 只能排两行就被省略号截断，而状态文字（「服务就绪 · http://127.0.0.1:1666」）
+         * 比半张卡还宽；整行宽度下这两行文字都能一次读全，不用点进去才知道。
+         *
+         * 卡片内部也随之改成横向：图标在左、文字在右（见 buildFeatureCard）。
+         * 竖向堆叠在整行宽度下会拉得很高，一屏只装得下一张半，反而更难扫。
+         */
+        for (int i = 0; i < list.length; i++) {
+            View card = buildFeatureCard(list[i]);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            // 第一张卡已经与上面的「功能」标题留了间距，这里只隔开卡片之间。
+            lp.topMargin = dp(this, 10);
+            content.addView(card, lp);
         }
     }
 
     /**
-     * 「滑动菜单」入口卡片。
+     * 一张功能卡片：左侧图标 + 功能名 + 尾部箭头。
      *
-     * <p>菜单是「全局一套」的 —— 任何一个手柄滑过阈值都弹同一份菜单，
-     * 项序号也从同一套列表算起。所以它放在「滑动触发」页，和手柄、
-     * 触发距离并列，而不是塞进某个手柄的编辑页（那样会让人以为
-     * 每个手柄能各配一菜单）。
+     * <p>【卡片上只留图标和名字】原来还有第三行的灰色介绍、以及一行会变的
+     * 状态文字（「服务就绪 · http://127.0.0.1:1666」「内存 62% · 电量 87%」）。
+     * 两行小字都去掉了：名字已经说明这是什么，而状态是进去看一眼才知道准的信息 ——
+     * 停在这一页盯着轮询等它变，本来也不是该做的事。
+     *
+     * <p>没有小字之后，卡片高度只由图标决定，四张天然等高，
+     * 不再需要「固定两行 + 最小高度」那套对齐手段。
      */
-    private void buildMenuCard(ViewGroup parent) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setElevation(dp(1));
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        TextView t = new TextView(this);
-        t.setText("滑动菜单");
-        t.setTextSize(14.5f);
-        t.setTypeface(null, Typeface.BOLD);
-        t.setTextColor(C_TEXT);
-        col.addView(t);
-        TextView sub = new TextView(this);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(C_HINT);
-        sub.setLineSpacing(0f, 1.35f);
-        tvMenuSub = sub;
-        refreshMenuCard();
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(3);
-        col.addView(sub, sl);
-        row.addView(col, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        TextView arrow = new TextView(this);
-        arrow.setText("›");
-        arrow.setTextSize(20);
-        arrow.setTextColor(C_HINT);
-        arrow.setPadding(dp(8), 0, 0, 0);
-        row.addView(arrow);
-        row.setOnClickListener(v -> EdgeGestureMenuActivity.open(this));
-        card.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        parent.addView(card, cardLp());
-    }
-
-    /**
-     * 刷新「滑动菜单」卡片的状态文案。
-     *
-     * 开关与菜单项都由 {@link EdgeGestureMenuActivity} 改，
-     * 本页只负责如实显示；所以每次回到前台都要重读一次 Prefs。
-     *
-     * tvMenuSub 为 null 时（没打开「滑动触发」页 / 页面重建中）安全跳过，
-     * 与 {@link #refreshGestureState()} 的写法一致。
-     */
-    private void refreshMenuCard() {
-        if (tvMenuSub == null) {
-            return;
-        }
-        boolean on = EdgeGesturePrefs.isMenuEnabled(this);
-        int n = EdgeGesturePrefs.getMenuItems(this).size();
-        if (!on) {
-            tvMenuSub.setText("未启用 · 现在是「滑过距离立即触发」");
-        } else if (n == 0) {
-            tvMenuSub.setText("已启用，但一项都没配 —— 先添加菜单项");
-        } else {
-            tvMenuSub.setText("已启用 · " + n + " 项 · 滑出后不抬手就能选");
-        }
-    }
-
-    /** 刷新「滑动触发」页的状态文案（没打开这一页时 tvGestureState 为 null，安全跳过）。 */
-    private void refreshGestureState() {
-        if (tvGestureState == null) {
-            return;
-        }
-        boolean on = EdgeGesturePrefs.isEnabled(this);
-        boolean overlay = android.provider.Settings.canDrawOverlays(this);
-        String s;
-        int color;
-        if (!on) {
-            s = "已关闭 · 手势引擎未运行";
-            color = C_TEXT_SUB;
-        } else if (!overlay) {
-            s = "已开启，但缺少「悬浮窗权限」，手柄无法显示";
-            color = C_WARN;
-        } else if (EdgeGesturePrefs.gsRunning) {
-            s = "运行中 · 当前 " + EdgeGesturePrefs.gsHandleCount + " 个手柄";
-            color = C_OK;
-        } else {
-            s = "已开启，服务正在启动…";
-            color = C_TEXT_SUB;
-            // 状态还没就绪，排一条自收敛的重试链，稍后自己刷新。
-            scheduleGestureRecheck(0);
-        }
-        tvGestureState.setText(s);
-        tvGestureState.setTextColor(color);
-        if (EdgeGesturePrefs.gsRunning) {
-            // 已经跑到「运行中」，就不必再重试了。
-            cancelGestureRecheck();
-        }
-    }
-
-    /**
-     * 排一条「稍后重新读一次手势状态」的延迟任务。
-     *
-     * 背景：gsRunning 是服务的静态标志，只有 onStartCommand 真正执行到那一行才为 true。
-     * 用户从最近任务里划掉应用时，Activity 会走 onResume → refreshGestureState，
-     * 而此刻服务往往还在重建途中，于是界面停在「服务正在启动…」。
-     * 这里让它在 6 秒内自己多读几次，服务一就绪界面就自动变成「运行中」。
-     *
-     * 写法上刻意把计数放在任务自己身上（不用成员变量）：
-     * 每条链各数各的，永远不会互相踩，也不必担心重复排队造成计数错乱。
-     *
-     * @param delays 已经延迟过几次
-     */
-    private void scheduleGestureRecheck(final int delays) {
-        if (tvGestureState == null) {
-            return;
-        }
-        // 已经排了一条链就别再排第二条（每条链都排在同一个 Handler 上，
-        // 靠这个标志保证同一时刻最多只有一条链在跑）。
-        if (gestureRecheckPending) {
-            return;
-        }
-        if (delays >= GESTURE_RECHECK_MAX) {
-            return;
-        }
-        gestureRecheckPending = true;
-        if (gestureRecheckHandler == null) {
-            gestureRecheckHandler = new android.os.Handler(getMainLooper());
-        }
-        gestureRecheckHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                gestureRecheckPending = false;
-                if (tvGestureState == null) {
-                    return;
-                }
-                if (EdgeGesturePrefs.gsRunning) {
-                    // 服务就绪了：复用它把文案与颜色一起改对。
-                    refreshGestureState();
-                    return;
-                }
-                if (!EdgeGesturePrefs.isEnabled(MainActivity.this)) {
-                    // 用户中途关了总开关，不必再等。
-                    refreshGestureState();
-                    return;
-                }
-                if (!android.provider.Settings.canDrawOverlays(MainActivity.this)) {
-                    // 缺悬浮窗权限，服务起不来，重试也不会变，交给 refreshGestureState 报状态。
-                    refreshGestureState();
-                    return;
-                }
-                // 还是没就绪，但说明服务确实在启动途中，我们主动再拉它一次，
-                // 避免它卡在「已请求但一直没走 onStartCommand」的状态。
-                EdgeGestureService.sync(MainActivity.this);
-                scheduleGestureRecheck(delays + 1);
-            }
-        }, GESTURE_RECHECK_INTERVAL);
-    }
-
-    /** 手势状态已确定时，取消还在排队的重试，省掉无谓的唤醒。 */
-    private void cancelGestureRecheck() {
-        gestureRecheckPending = false;
-        if (gestureRecheckHandler != null) {
-            gestureRecheckHandler.removeCallbacksAndMessages(null);
-        }
-    }
-
-    /**
-     * 「启用 OCR 服务」开关卡片。
-     *
-     * 【为什么单独做成一张卡而不是塞进状态卡】
-     * 状态卡说的是「现在是什么情况」，这张卡说的是「要不要开」。
-     * 混在一起点击区域会跟状态文字打架（用户点状态也会误触开关）。
-     *
-     * 【关掉之后影响什么】
-     * 只影响 HTTP 接口这条链路：接口不再监听、模型不再常驻、开机不再自启。
-     * 边缘滑动手势是另一个服务，不受影响 —— 这正是本开关要服务的人群：
-     * 只想用手势触发宏、不想养着一个 OCR 服务的人。
-     */
-    /**
-     * 合并后的「OCR 服务」卡片：状态点 + 标题 + 接口地址 + 总开关。
-     *
-     * ════════════════════════════════════════════════════════════
-     * 【为什么把状态卡和开关卡并成一张】
-     * ════════════════════════════════════════════════════════════
-     * 它们回答的是同一个问题 ——「服务开着吗、能用吗」。拆成两张卡时，
-     * 用户要先读「服务已就绪」再往下找开关，两个信息在视觉上还被一条
-     * 分割线隔开，反倒像是两件不相干的事。并成一张后：左边状态点告诉
-     * 你现在行不行，右边开关就是让它行/不行的那个东西。
-     *
-     * ════════════════════════════════════════════════════════════
-     * 【关掉之后影响什么】
-     * ════════════════════════════════════════════════════════════
-     * 只影响 HTTP 接口这条链路：接口不再监听、模型不再常驻、开机不再自启。
-     * 边缘滑动手势是另一个服务，不受影响 —— 这正是本开关要服务的人群：
-     * 只想用手势触发宏、不想养着一个 OCR 服务的人。
-     */
-    private View buildOcrServiceCard() {
+    private View buildFeatureCard(final Feature f) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setElevation(dp(1));
+        card.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 16));
+        card.setPadding(dp(this, 16), dp(this, 16), dp(this, 14), dp(this, 16));
+        card.setElevation(dp(this, 1));
+        card.setClickable(true);
+        card.setFocusable(true);
 
-        // ---- 左侧：状态点 ----
-        TextView dot = new TextView(this);
-        dot.setBackgroundResource(R.drawable.dot_ok);
-        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(9), dp(9));
-        dotLp.setMarginEnd(dp(12));
-        card.addView(dot, dotLp);
-        tvStatusDot = dot;
+        // 图标：浅色方块 + 一个字。比引入图标资源更省事，也不依赖矢量资源生成。
+        TextView icon = new TextView(this);
+        icon.setText(f.icon);
+        icon.setTextSize(17);
+        icon.setTypeface(null, Typeface.BOLD);
+        icon.setTextColor(C_BRAND);
+        icon.setGravity(Gravity.CENTER);
+        GradientDrawable iconBg = new GradientDrawable();
+        iconBg.setColor(C_BRAND_SOFT);
+        iconBg.setCornerRadius(dp(this, 12));
+        icon.setBackground(iconBg);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(this, 44), dp(this, 44));
+        ilp.setMarginEnd(dp(this, 14));
+        card.addView(icon, ilp);
 
-        // ---- 中间：标题 + 接口地址 ----
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-
-        TextView t = new TextView(this);
-        t.setText("OCR 服务");
-        t.setTextSize(14.5f);
-        t.setTypeface(null, Typeface.BOLD);
-        t.setTextColor(C_TEXT);
-        col.addView(t);
-        tvStatusText = t;
-
-        TextView sub = new TextView(this);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(C_TEXT_SUB);
-        sub.setLineSpacing(dp(3), 1f);
-        // 副标题＝接口地址；关掉开关后 refreshStatus() 会把它改成「接口未监听」
-        sub.setText(LOCAL_URL);
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sl.topMargin = dp(4);
-        col.addView(sub, sl);
-        tvStatusSub = sub;
-
-        card.addView(col, new LinearLayout.LayoutParams(0,
+        TextView name = new TextView(this);
+        name.setText(f.name);
+        name.setTextSize(15.5f);
+        name.setTypeface(null, Typeface.BOLD);
+        name.setTextColor(C_TEXT);
+        // weight=1：名字吃掉图标与箭头之外的全部宽度。
+        card.addView(name, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // ---- 右侧：总开关 ----
-        android.widget.Switch sw = new android.widget.Switch(this);
-        sw.setChecked(OCRService.isEnabled(this));
-        sw.setOnCheckedChangeListener((b, checked) -> {
-            OCRService.setEnabled(this, checked);
-            if (checked) {
-                // 【为什么要清掉 serviceStarting】
-                // ensureServiceRunning() 见到 serviceStarting=true 会直接返回，
-                // 那个标志是上一次启动的 4 秒保护窗口、只在 postDelayed 里复位。
-                // 若用户正好在这个窗口内「先关后开」，这次打开就会被短路掉，
-                // 而 4 秒后没有任何代码会替他重试 —— 界面会永远停在
-                // 「正在加载模型…」，看着就像开关坏了。
-                // 这里清掉是安全的：重复 startForegroundService 本身幂等。
-                serviceStarting = false;
-                // 开启：立刻拉起来，不用等下次进 App。
-                ensureServiceRunning();
-            }
-            // 关闭时 setEnabled 已经 stopService 了，这里不用再管。
-            // 稍等一下再刷新：服务的 isRunning 是在 onDestroy 里翻的，
-            // 立刻刷新会短暂显示成「正在加载模型…」，看着像没关掉。
-            new android.os.Handler(getMainLooper()).postDelayed(this::refreshStatus, 600);
-            toast(checked ? "已启用 OCR 服务" : "已关闭 OCR 服务");
-        });
-        card.addView(sw);
+        // 尾部「›」：明示这一行可以点进去。不画 V 形矢量图，一个字符足够。
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextSize(22);
+        arrow.setTextColor(C_HINT);
+        arrow.setGravity(Gravity.CENTER);
+        arrow.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(dp(this, 24),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.setMarginStart(dp(this, 6));
+        card.addView(arrow, alp);
+
+        // 整张卡可点，水波纹覆盖全卡：命中区域比只点文字大得多。
+        GradientDrawable mask = new GradientDrawable();
+        mask.setColor(Color.WHITE);
+        mask.setCornerRadius(dp(this, 16));
+        RippleDrawable ripple = new RippleDrawable(
+                ColorStateList.valueOf(0x224F6BED), card.getBackground(), mask);
+        card.setBackground(ripple);
+        card.setOnClickListener(v -> f.action.run());
 
         return card;
     }
@@ -923,13 +288,6 @@ public class MainActivity extends AppCompatActivity {
     //  顶栏「⋮」里的两项设置
     // ============================================================
 
-    /**
-     * 菜单项标题带当前状态，例如「从最近任务隐藏：已开」。
-     *
-     * 为什么不带勾选框：AlertDialog 的 setItems 不支持多选样式，
-     * 而这里每项都是「点一下切换」的即时动作 —— 把状态写进标题，
-     * 用户打开菜单就知道现在是什么状态，不必再去别处确认。
-     */
     private String recentsMenuTitle() {
         return "从最近任务隐藏：" + (OCRService.isHiddenFromRecents(this) ? "已开" : "关");
     }
@@ -938,977 +296,42 @@ public class MainActivity extends AppCompatActivity {
         return "后台保活：" + (isIgnoringBatteryOptimizations() ? "已在白名单" : "未加入");
     }
 
-    /** 点一下就在开、关之间切换，不用弹二次确认。 */
     private void toggleHideFromRecents() {
         boolean next = !OCRService.isHiddenFromRecents(this);
         OCRService.setHiddenFromRecents(this, next);
-        // 就地生效，界面不重载：切到多任务立刻就能看到结果。
         OCRService.applyRecents(this);
         toast(next ? "已从最近任务隐藏" : "已恢复显示在最近任务");
-        refreshStatus();
     }
 
-    /** 已在白名单就不重复申请（系统那边会弹一个「无需更改」的框，很困惑）。 */
     private void openBatteryWhitelist() {
         if (isIgnoringBatteryOptimizations()) {
             toast("已在电池优化白名单里");
             return;
         }
         requestIgnoreBatteryOptimizations();
-        // 从系统页返回后 onResume 会再刷一次，这里先不管
     }
 
     // ============================================================
-    //  OCR设置页
-    // ============================================================
-    /**
-     * 「OCR设置」页 = 原「在线调试」页 + 原「接口文档」页里的总开关。
-     *
-     * 【合并理由】宏现在直接在 MacroDroid 里选插件配置，没人再照着
-     * 接口文档手写 HTTP 请求了。文档页删掉，只把仍然有用的
-     * 「启用 OCR 服务」开关搬过来 —— 它本来就是「要不要开这个服务」，
-     * 和这一页的状态、保活、截屏、预览是同一件事。
-     */
-
-    private void buildOcrSettingsPage(ViewGroup parent) {
-        // ---------- 服务状态 + 总开关（合并成一张） ----------
-        parent.addView(buildOcrServiceCard(), cardLp());
-
-        // 「后台保活」与「从最近任务隐藏」原先各是一张卡，现在都收进
-        // 顶栏「⋮」菜单了 —— 这两项都是配一次就不再动的设置，放在页面里
-        // 反而把「截屏识别」「识别结果」这些常用内容挤到了下面。
-        //
-        // 但保活状态必须还能一眼看到：没进白名单的机器上 Android 会随时
-        // 冻结后台进程，表现是「服务莫名停止」。这里只留一行提示，
-        // 不进白名单时才显示，点一下就能去设置。
-        tvBatteryText = new TextView(this);
-        tvBatteryText.setTextSize(11.5f);
-        tvBatteryText.setTextColor(C_WARN);
-        tvBatteryText.setLineSpacing(0f, 1.35f);
-        tvBatteryText.setPadding(dp(4), dp(2), dp(4), dp(2));
-        tvBatteryText.setOnClickListener(v -> openBatteryWhitelist());
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        // 负的 topMargin：卡片下方已经有 cardLp() 的 12dp 间距，这里贴回去一点，
-        // 让它看起来像紧跟着服务卡的附带说明，而不是另起一段。
-        blp.topMargin = -dp(4);
-        parent.addView(tvBatteryText, blp);
-
-        // ---------- 截屏识别 ----------
-        addSectionTitle(parent, "屏幕截屏识别");
-
-        LinearLayout capCard = new LinearLayout(this);
-        capCard.setOrientation(LinearLayout.VERTICAL);
-        capCard.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        capCard.setPadding(dp(16), dp(14), dp(16), dp(14));
-        capCard.setElevation(dp(1));
-        capCard.setId(android.R.id.widget_frame);
-
-        TextView capTitle = new TextView(this);
-        capTitle.setText("截屏识别");
-        capTitle.setTextSize(14);
-        capTitle.setTypeface(null, Typeface.BOLD);
-        capTitle.setTextColor(C_TEXT);
-        capCard.addView(capTitle);
-
-        capInfo = new TextView(this);
-        capInfo.setTextSize(11.5f);
-        capInfo.setPadding(0, dp(4), 0, 0);
-        capCard.addView(capInfo);
-
-        LinearLayout capRow = new LinearLayout(this);
-        capRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams capRowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        capRowLp.topMargin = dp(10);
-        capRow.setLayoutParams(capRowLp);
-        capRow.addView(secondaryButton("检测 root 截屏", v -> probeRootCapture()), weightLp());
-        capRow.addView(secondaryButton("截屏并识别", v -> captureAndOcr()), weightLp());
-        capCard.addView(capRow);
-
-        LinearLayout capRow2 = new LinearLayout(this);
-        capRow2.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams capRow2Lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        capRow2Lp.topMargin = dp(4);
-        capRow2.setLayoutParams(capRow2Lp);
-        // 三种截屏方式并列：无障碍（最省事，免 root 免授权）／root（自动）／
-        // MediaProjection（手动授权一次）。
-        capRow2.addView(secondaryButton("无障碍截图", v -> openAccessibilitySettings()),
-                weightLp());
-        capRow2.addView(secondaryButton("开启截屏授权", v -> requestScreenCapture()),
-                weightLp());
-        capRow2.addView(secondaryButton("悬浮窗权限", v -> requestOverlayPermission()),
-                weightLp());
-        capCard.addView(capRow2);
-
-        TextView capNote = new TextView(this);
-        capNote.setText("① 无障碍（推荐）：勾选「" + A11Y_LABEL + "」，免 root、不弹框。\n"
-                + "② root 截屏：有 root 时自动启用。\n"
-                + "③ 截屏授权：无 root 时的兜底，每次重启需手点一次。\n"
-                + "任一可用即可，不必都开。");
-        capNote.setTextSize(11);
-        capNote.setTextColor(C_HINT);
-        capNote.setLineSpacing(0f, 1.3f);
-        capNote.setPadding(0, dp(8), 0, 0);
-        capCard.addView(capNote);
-
-        parent.addView(capCard, cardLp());
-        updateCaptureInfo();
-
-        // ---------- 图片预览框 ----------
-        addSectionTitle(parent, "图片预览");
-
-        LinearLayout previewCard = new LinearLayout(this);
-        previewCard.setOrientation(LinearLayout.VERTICAL);
-        previewCard.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        previewCard.setElevation(dp(1));
-        previewCard.setGravity(Gravity.CENTER);
-
-        // 预览区（固定高度，居中显示）
-        android.widget.FrameLayout previewBox = new android.widget.FrameLayout(this);
-        previewBox.setBackgroundColor(0xFFEFF1F6);
-        previewBox.setMinimumHeight(dp(200));
-
-        previewImage = new ImageView(this);
-        previewImage.setAdjustViewBounds(true);
-        previewImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        previewImage.setVisibility(View.GONE);
-        android.widget.FrameLayout.LayoutParams imgLp = new android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        previewBox.addView(previewImage, imgLp);
-
-        previewPlaceholder = new TextView(this);
-        previewPlaceholder.setText("选择图片后显示预览");
-        previewPlaceholder.setTextSize(13);
-        previewPlaceholder.setTextColor(C_HINT);
-        previewPlaceholder.setGravity(Gravity.CENTER);
-        previewBox.addView(previewPlaceholder, new android.widget.FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(220));
-        previewCard.addView(previewBox, boxLp);
-
-        tvPreviewInfo = new TextView(this);
-        tvPreviewInfo.setText("未选择图片");
-        tvPreviewInfo.setTextSize(11.5f);
-        tvPreviewInfo.setTextColor(C_TEXT_SUB);
-        tvPreviewInfo.setPadding(dp(14), dp(10), dp(14), 0);
-        previewCard.addView(tvPreviewInfo);
-
-        LinearLayout previewBtns = new LinearLayout(this);
-        previewBtns.setOrientation(LinearLayout.HORIZONTAL);
-        previewBtns.setPadding(dp(10), dp(10), dp(10), dp(10));
-        previewBtns.addView(secondaryButton("选择图片", v -> pickImage()), weightLp());
-        previewBtns.addView(secondaryButton("重新加载", v -> loadPreview(currentPath)), weightLp());
-        previewBtns.addView(secondaryButton("清空", v -> clearPreview()), weightLp());
-        previewCard.addView(previewBtns);
-
-        parent.addView(previewCard, cardLp());
-
-        // ---------- 图片路径 ----------
-        addSectionTitle(parent, "图片路径");
-        etPath = new EditText(this);
-        styleInput(etPath);
-        etPath.setHint("如 /sdcard/test.png");
-        etPath.setText("/sdcard/test.png");
-        etPath.setSingleLine(true);
-        etPath.addTextChangedListener(new TextWatcher() {
-            @Override
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            @Override
-            public void afterTextChanged(Editable s) {
-                currentPath = s.toString().trim();
-            }
-        });
-        parent.addView(etPath, inputLp());
-        currentPath = "/sdcard/test.png";
-
-        // ---------- 识别格式 ----------
-        addSectionTitle(parent, "识别格式");
-        formatSpinner = new Spinner(this);
-        String[] modes = {"1 · 纯文本", "2 · Json 数组（含坐标）", "3 · 详细 Json（含矩形）"};
-        formatSpinner.setAdapter(new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, modes));
-        formatSpinner.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 12));
-        formatSpinner.setPadding(dp(12), dp(10), dp(12), dp(10));
-        parent.addView(formatSpinner, inputLp());
-
-        // ---------- 模型档位 ----------
-        addSectionTitle(parent, "模型档位");
-        tierSpinner = new Spinner(this);
-        tierSpinner.setAdapter(new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_dropdown_item, TIER_LABELS));
-        tierSpinner.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 12));
-        tierSpinner.setPadding(dp(12), dp(10), dp(12), dp(10));
-        tierSpinner.setSelection(Math.max(0, Math.min(TIER_LABELS.length - 1,
-                OCRService.currentTier)), false);
-        tierSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
-                applyTier(pos);
-            }
-
-            @Override
-            public void onNothingSelected(android.widget.AdapterView<?> p) {
-            }
-        });
-        parent.addView(tierSpinner, inputLp());
-
-        tierInfo = new TextView(this);
-        tierInfo.setTextSize(11.5f);
-        tierInfo.setTextColor(C_TEXT_SUB);
-        tierInfo.setLineSpacing(0f, 1.3f);
-        LinearLayout.LayoutParams tierLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tierLp.topMargin = dp(6);
-        parent.addView(tierInfo, tierLp);
-        updateTierInfo();
-
-        // ---------- 开始识别 ----------
-        Button btnOcr = primaryButton("开始识别");
-        LinearLayout.LayoutParams ocrLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
-        ocrLp.topMargin = dp(18);
-        parent.addView(btnOcr, ocrLp);
-
-        // ---------- 识别结果 ----------
-        addSectionTitle(parent, "识别结果");
-        tvResult = new TextView(this);
-        tvResult.setText("等待识别…");
-        tvResult.setTextSize(12);
-        tvResult.setTypeface(Typeface.MONOSPACE);
-        tvResult.setTextColor(C_CODE_TEXT);
-        tvResult.setPadding(dp(16), dp(14), dp(16), dp(14));
-        GradientDrawable resBg = new GradientDrawable();
-        resBg.setColor(C_CODE_BG);
-        resBg.setCornerRadius(dp(14));
-        tvResult.setBackground(resBg);
-        tvResult.setMovementMethod(new android.text.method.ScrollingMovementMethod());
-        tvResult.setMinLines(6);
-        tvResult.setTextIsSelectable(true);
-        LinearLayout.LayoutParams resLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        resLp.topMargin = dp(4);
-        parent.addView(tvResult, resLp);
-
-        // 日志已收进顶栏「⋮」菜单（LogCard.buildMenuButton），不再占页面底部。
-        // ---------- 事件 ----------
-        btnOcr.setOnClickListener(v -> startOcr());
-
-        // 进入页面时自动加载一次预览
-        loadPreview(currentPath);
-    }
-
-    // ============================================================
-    //  图片选择与预览
+    //  服务拉起 / 权限 / 保活
     // ============================================================
 
-    private void pickImage() {
-        try {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("image/*");
-            startActivityForResult(intent, REQ_PICK_IMAGE);
-        } catch (Exception e) {
-            toast("无法打开文件选择器");
-        }
-    }
-
-    // ============================================================
-    //  屏幕截屏
-    // ============================================================
-
-    private void updateCaptureInfo() {
-        if (capInfo == null) {
+    /** 按总开关决定要不要拉起 OCR 服务（关着就什么都不做）。 */
+    private void ensureOcrService() {
+        if (!OCRService.isEnabled(this) || OCRService.isRunning) {
             return;
         }
-        // 无障碍是「有没有勾选」的实时状态，不看 captureMode ——
-        // captureMode 只在真正截过一次之后才会被写上。
-        boolean a11y = OcrAccessibilityService.isReady();
-        boolean root = "root".equals(OCRService.captureMode);
-        boolean mp = "mediaprojection".equals(OCRService.captureMode);
-        if (a11y) {
-            capInfo.setText("● 无障碍截图已启用，无需授权，可直接截屏识别");
-            capInfo.setTextColor(C_OK);
-            captureReady = true;
-        } else if (root) {
-            capInfo.setText("● root 截屏已启用，无需授权，可直接截屏识别");
-            capInfo.setTextColor(C_OK);
-            captureReady = true;
-        } else if (captureReady || mp) {
-            capInfo.setText("● 已授权（MediaProjection），可直接截屏识别");
-            capInfo.setTextColor(C_OK);
-        } else {
-            // 未就绪时，把「悬浮窗权限」也一起提示出来 ——
-            // 没有它，插件在后台无法自动弹授权框
-            boolean overlay = Build.VERSION.SDK_INT < Build.VERSION_CODES.M
-                    || android.provider.Settings.canDrawOverlays(this);
-            StringBuilder sb = new StringBuilder();
-            sb.append("○ 未就绪，三种方式任选其一：\n")
-              .append("· 点「无障碍截图」勾选一次，之后永久免授权（推荐）\n")
-              .append("· 有 root 的设备会自动启用 root 截屏\n")
-              .append("· 或点「开启截屏授权」走录屏授权（重启后需重新点）");
-            if (!overlay) {
-                sb.append("\n⚠ 未开启「悬浮窗权限」：插件在后台无法自动申请截屏");
-            }
-            capInfo.setText(sb.toString());
-            capInfo.setTextColor(C_WARN);
-        }
-    }
-
-    /** 通过服务暴露的静态标志确认截屏是否真的就绪。 */
-    private void probeCaptureReady() {
-        captureReady = OCRService.screenCaptureReady || OcrAccessibilityService.isReady();
-        updateCaptureInfo();
-        if (captureReady) {
-            toast("截屏授权已开启，现在可直接截屏识别");
-        } else {
-            toast("截屏初始化失败，请查看日志或重新授权");
-        }
-    }
-
-    /** 申请屏幕捕获权限（系统会弹一次授权框，授权后长期有效）。 */
-    private void requestScreenCapture() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-            toast("当前系统版本不支持截屏识别");
-            return;
-        }
-        try {
-            android.media.projection.MediaProjectionManager mgr =
-                    (android.media.projection.MediaProjectionManager)
-                            getSystemService(MEDIA_PROJECTION_SERVICE);
-            if (mgr == null) {
-                toast("无法获取投屏服务");
-                return;
-            }
-            startActivityForResult(mgr.createScreenCaptureIntent(), REQ_SCREEN_CAPTURE);
-        } catch (Exception e) {
-            toast("申请截屏失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 跳到系统「无障碍」设置页。
-     *
-     * 【为什么不能像普通权限那样 requestPermissions】
-     * 无障碍服务只能由用户在系统设置里手动勾选，应用无权自行开启 ——
-     * 这是 Android 的设计（否则任何 App 都能偷偷拿到屏幕内容）。
-     * 所以这里只负责把用户送到那一页，剩下的由他自己决定。
-     */
-    private void openAccessibilitySettings() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            toast("无障碍截图需要 Android 11 及以上，"
-                    + "本机请改用 root 或「开启截屏授权」");
-            return;
-        }
-        if (OcrAccessibilityService.isReady()) {
-            toast("无障碍截图已开启，可直接截屏识别");
-            return;
-        }
-        try {
-            Intent intent = new Intent(
-                    android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(intent);
-            toast("请在列表中找到「" + A11Y_LABEL + "」并开启");
-        } catch (Exception e) {
-            toast("无法打开无障碍设置: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 申请「悬浮窗权限」（SYSTEM_ALERT_WINDOW）。
-     *
-     * 【为什么需要】
-     * MacroDroid 在后台触发插件时，本应用可能处于后台/已死状态。
-     * 此时要弹出截屏授权框，就必须能从后台启动 Activity ——
-     * 而 Android 10+ 只允许「拥有悬浮窗权限」的应用这么做。
-     *
-     * 没有这个权限时，插件仍能工作，但需要用户先手动打开一次 App 授权。
-     *
-     * 注意：该权限不能通过 requestPermissions 申请，
-     * 必须跳转到系统设置页由用户手动开启。
-     */
-    private void requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            toast("当前系统版本无需此权限");
-            return;
-        }
-        try {
-            if (android.provider.Settings.canDrawOverlays(this)) {
-                toast("悬浮窗权限已开启");
-                return;
-            }
-            Intent intent = new Intent(
-                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
-            intent.setData(Uri.parse("package:" + getPackageName()));
-            startActivity(intent);
-            toast("请在系统设置里允许「显示在其他应用上层」");
-        } catch (Exception e) {
-            // 部分 ROM 不支持带 package 的跳转，退回通用设置页
-            try {
-                startActivity(new Intent(
-                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
-            } catch (Exception e2) {
-                toast("无法打开悬浮窗权限设置: " + e2.getMessage());
-            }
-        }
-    }
-
-    /** 截屏后直接走本地接口识别。 */
-    private void captureAndOcr() {
-        // 开关没开时截屏识别同样走不通（服务不在，HTTP 直接失败）。
-        if (!warnIfOcrDisabled()) {
-            return;
-        }
-        // 先按服务的真实状态判断（root 可用时 captureReady 可能还没同步过来）
-        boolean readyNow = OCRService.screenCaptureReady
-                || OcrAccessibilityService.isReady();
-        if (!readyNow && !captureReady) {
-            // 有 root 但还没探测完时，只提示等待，不要弹授权框
-            if (RootScreenCaptureManager.isRootAvailable()) {
-                toast("正在初始化 root 截屏，请稍候再试");
-                refreshCaptureMode();
-            } else {
-                toast("请先开启「无障碍截图」，或点「开启截屏授权」");
-                openAccessibilitySettings();
-            }
-            return;
-        }
-        final int type = formatSpinner == null ? 1 : formatSpinner.getSelectedItemPosition() + 1;
-
-        tvResult.setText("正在截屏识别…");
-        new Thread(() -> {
-            // 不传任何图片参数，服务端会自动截屏
-            String result = doHttpRequest(null, type);
-            runOnUiThread(() -> {
-                showResult(result);
-                if (type >= 2) {
-                    drawBoxesOnBitmapFromResult(result);
-                }
-            });
-        }).start();
-    }
-
-    /** 把截屏结果里的坐标画在预览图上。 */
-    private void drawBoxesOnBitmapFromResult(String result) {
-        try {
-            // 关键：必须画在「本次识别的那张截图」上。
-            // 之前一直用 previewBitmap，若用户此前选过图片，
-            // 就是把屏幕坐标画在另一张图上，位置必然完全不对。
-            Bitmap src = null;
-            String capPath = OCRService.lastCapturePath;
-            if (capPath != null && new File(capPath).exists()) {
-                src = decodeSampled(capPath, 1600);
-            }
-            // 兜底：拿不到截屏缓存时才退回当前预览图
-            if (src == null) {
-                src = (previewBitmap == null || previewBitmap.isRecycled())
-                        ? null : previewBitmap.copy(Bitmap.Config.ARGB_8888, true);
-            }
-            if (src == null) {
-                return;
-            }
-            if (!src.isMutable()) {
-                Bitmap mutable = src.copy(Bitmap.Config.ARGB_8888, true);
-                src.recycle();
-                src = mutable;
-            }
-            if (src == null) {
-                return;
-            }
-            drawBoxes(src, result);
-        } catch (Exception ignored) {
-            // 画框是纯展示，解码或绘制异常不应该让已经拿到的识别结果丢失。
-        }
-    }
-
-    /**
-     * 切换档位。
-     *
-     * 刻意走 HTTP 接口而不是直接调 Service——
-     * 这样界面切换和外部调用切换是**同一条代码路径**，
-     * 不会出现"界面切了但接口没切"的不一致。
-     * 接口里 tier 是全局状态，切换后对所有请求生效。
-     */
-    private void applyTier(int tier) {
-        if (tierSwitching) return;
-        if (tier == OCRService.currentTier) {
-            updateTierInfo();
-            return;
-        }
-
-        ensureServiceRunning();
-
-        tierSwitching = true;
-        updateTierInfo();
-        final String tierName = OCRService.tierName(tier);
-        new Thread(() -> {
-            // 【修复⑪】统一走 Http.post（与插件/BroadcastReceiver 同一条实现），
-            // 不再保留 Activity 内那第二份几乎相同的 postJson。
-            // 超时与原 postJson 一致：连接 5s / 读取 30s。
-            String resp = Http.post(this,
-                    "{\"tier\":\"" + tierName + "\",\"action\":\"setTier\"}", 5000, 30000);
-
-            // 以返回体里的 "tier=xxx" 为准，而不是含糊地找 status 200——
-            // 后者一旦接口返回其它 200 响应就会误判成功。
-            boolean ok = resp != null && resp.contains("tier=" + tierName);
-            String respFinal = resp;
-
-            runOnUiThread(() -> {
-                tierSwitching = false;
-                if (ok) {
-                    OCRService.currentTier = tier;
-                    toast("已切换到 " + tierName + " 档");
-                } else {
-                    String reason = respFinal == null ? "服务未响应" : respFinal.trim();
-                    if (reason.length() > 120) reason = reason.substring(0, 120) + "…";
-                    toast("切换失败：" + reason);
-                    if (tierSpinner != null) {
-                        tierSpinner.setSelection(OCRService.currentTier, false);
-                    }
-                }
-                updateTierInfo();
-            });
-        }, "xsocr-tier").start();
-    }
-
-    /** 刷新档位说明文字。 */
-    private void updateTierInfo() {
-        if (tierInfo == null) return;
-        String cur = OCRService.tierName(OCRService.currentTier);
-        if (tierSwitching) {
-            tierInfo.setText("正在切换模型档位…（small 首次加载需 1~3 秒）");
-            return;
-        }
-        String detail;
-        switch (OCRService.currentTier) {
-            case OCRService.TIER_RAPID:
-                detail = "ML Kit（捆绑版，中英），无需 Google Play 服务。";
-                break;
-            case OCRService.TIER_SMALL:
-                detail = "高精度档：字典 18708 字符。";
-                break;
-            default:
-                detail = "轻量档：字典 6904 字符，速度最快。";
-                break;
-        }
-        tierInfo.setText("当前：" + cur + "\n" + detail);
-    }
-
-    /** 把截屏授权结果交给服务，建立投屏会话。 */
-    private void startCaptureSession(int resultCode, Intent data) {
         try {
             Intent intent = new Intent(this, OCRService.class);
-            intent.setAction(OCRService.ACTION_START_CAPTURE);
-            intent.putExtra(OCRService.EXTRA_RESULT_CODE, resultCode);
-            intent.putExtra(OCRService.EXTRA_RESULT_DATA, data);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent);
             } else {
                 startService(intent);
             }
-            // 等投屏会话建立后再确认状态（不要盲目标记成功）
-            new android.os.Handler(getMainLooper()).postDelayed(this::probeCaptureReady, 900);
-        } catch (Exception e) {
-            toast("开启截屏失败: " + e.getMessage());
+        } catch (Throwable ignored) {
+            // 后台限制较严时可能抛 ForegroundServiceStartNotAllowedException。
+            // 静默失败即可：用户点进「文字识别」页时会再拉一次并给出提示。
         }
     }
-
-    /**
-     * 服务尚未拉起时，用轮询等待它就绪，再把授权结果送过去。
-     *
-     * 原先是在主线程 {@code Thread.sleep(800)}，既有 ANR 风险，
-     * 又因为固定时长在慢设备上不够而随机失败。改为轮询 + 上限。
-     */
-    private void waitServiceThenStartCapture(int resultCode, Intent data) {
-        final android.os.Handler h = new android.os.Handler(getMainLooper());
-        final int[] tries = {0};
-        final int maxTries = 40;      // 40 × 250ms = 最多等 10s
-        Runnable poll = new Runnable() {
-            @Override
-            public void run() {
-                if (OCRService.isRunning) {
-                    startCaptureSession(resultCode, data);
-                    return;
-                }
-                if (++tries[0] >= maxTries) {
-                    toast("服务启动超时，请重试");
-                    return;
-                }
-                h.postDelayed(this, 250);
-            }
-        };
-        h.postDelayed(poll, 250);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-
-        if (requestCode == REQ_SCREEN_CAPTURE) {
-            if (resultCode != RESULT_OK || data == null) {
-                toast("已取消截屏授权");
-                return;
-            }
-            // 注意：这里是主线程，绝不能 sleep。
-            // 服务没起来时先拉起，截屏授权结果延后再送（见 postStartCapture）。
-            if (!OCRService.isRunning) {
-                ensureServiceRunning();
-                waitServiceThenStartCapture(resultCode, data);
-                return;
-            }
-
-            startCaptureSession(resultCode, data);
-            return;
-        }
-
-        if (requestCode != REQ_PICK_IMAGE || resultCode != RESULT_OK || data == null) {
-            return;
-        }
-        Uri uri = data.getData();
-        if (uri == null) {
-            return;
-        }
-        try {
-            // 复制到应用缓存目录，便于本地服务 / 调试页读取
-            File dst = new File(getCacheDir(), "ocr_input.png");
-            InputStream in = getContentResolver().openInputStream(uri);
-            if (in == null) {
-                toast("无法读取所选图片");
-                return;
-            }
-            FileOutputStream out = new FileOutputStream(dst);
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                out.write(buf, 0, n);
-            }
-            out.flush();
-            out.close();
-            in.close();
-
-            currentPath = dst.getAbsolutePath();
-            if (etPath != null) {
-                etPath.setText(currentPath);
-            }
-            loadPreview(currentPath);
-        } catch (Exception e) {
-            toast("导入图片失败: " + e.getMessage());
-        }
-    }
-
-    /** 加载图片到预览框（不画框）。 */
-    private void loadPreview(String path) {
-        if (previewImage == null) {
-            return;
-        }
-        if (path == null || path.length() == 0) {
-            return;
-        }
-        Bitmap bmp = decodeSampled(path, 1600);
-        if (bmp == null) {
-            previewImage.setVisibility(View.GONE);
-            if (previewPlaceholder != null) {
-                previewPlaceholder.setVisibility(View.VISIBLE);
-                previewPlaceholder.setText("图片不存在或无法解码");
-            }
-            if (tvPreviewInfo != null) {
-                tvPreviewInfo.setText("未选择图片");
-            }
-            return;
-        }
-        if (previewBitmap != null && previewBitmap != bmp && !previewBitmap.isRecycled()) {
-            previewBitmap.recycle();
-        }
-        previewBitmap = bmp;
-        showBitmap(bmp);
-        if (tvPreviewInfo != null) {
-            tvPreviewInfo.setText(bmp.getWidth() + " × " + bmp.getHeight() + "   " + path);
-        }
-    }
-
-    private void showBitmap(Bitmap bmp) {
-        previewImage.setImageBitmap(bmp);
-        previewImage.setVisibility(View.VISIBLE);
-        if (previewPlaceholder != null) {
-            previewPlaceholder.setVisibility(View.GONE);
-        }
-    }
-
-    private void clearPreview() {
-        if (previewBitmap != null && !previewBitmap.isRecycled()) {
-            previewBitmap.recycle();
-        }
-        previewBitmap = null;
-        if (previewImage != null) {
-            previewImage.setImageDrawable(null);
-            previewImage.setVisibility(View.GONE);
-        }
-        if (previewPlaceholder != null) {
-            previewPlaceholder.setVisibility(View.VISIBLE);
-            previewPlaceholder.setText("选择图片后显示预览");
-        }
-        if (tvPreviewInfo != null) {
-            tvPreviewInfo.setText("未选择图片");
-        }
-    }
-
-    /** 按最大边长采样解码，避免大图 OOM。 */
-    private Bitmap decodeSampled(String path, int maxSide) {
-        try {
-            BitmapFactory.Options opts = new BitmapFactory.Options();
-            opts.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(path, opts);
-            if (opts.outWidth <= 0 || opts.outHeight <= 0) {
-                return null;
-            }
-            int sample = 1;
-            int longer = Math.max(opts.outWidth, opts.outHeight);
-            while (longer / sample > maxSide) {
-                sample *= 2;
-            }
-            opts.inJustDecodeBounds = false;
-            opts.inSampleSize = sample;
-            opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            return BitmapFactory.decodeFile(path, opts);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    // ============================================================
-    //  识别
-    // ============================================================
-
-    private void startOcr() {
-        final String p = etPath == null ? "" : etPath.getText().toString().trim();
-        final int type = formatSpinner == null ? 1 : formatSpinner.getSelectedItemPosition() + 1;
-
-        // 开关关着就别往下走了：ensureServiceRunning() 此时会直接返回，
-        // 后面的 HTTP 请求只会拿到「连接失败」，用户完全不知道是开关没开。
-        if (!warnIfOcrDisabled()) {
-            return;
-        }
-        if (p.length() == 0) {
-            toast("请输入图片路径或选择图片");
-            return;
-        }
-        if (!new File(p).exists()) {
-            toast("图片不存在: " + p);
-            return;
-        }
-
-        ensureServiceRunning();
-        tvResult.setText("识别中…");
-
-        new Thread(() -> {
-            String result = doHttpRequest(p, type);
-            runOnUiThread(() -> {
-                showResult(result);
-                // 识别完成后，把检测框画到预览图上
-                if (type >= 2) {
-                    drawBoxesOnPreview(p, result);
-                }
-            });
-        }).start();
-    }
-
-    /** 展示识别结果。type=1 只显示纯文字；type=2/3 原样显示服务端返回内容。 */
-    private void showResult(String result) {
-        if (tvResult == null) {
-            return;
-        }
-        if (result == null) {
-            tvResult.setText("无返回内容");
-            return;
-        }
-
-        int type = formatSpinner == null ? 1 : formatSpinner.getSelectedItemPosition() + 1;
-
-        // 只有纯文本模式需要从 {"status":200,"data":"文字"} 中取出文字
-        if (type == 1) {
-            try {
-                JsonElement el = JsonParser.parseString(result);
-                if (el.isJsonObject()) {
-                    JsonObject obj = el.getAsJsonObject();
-                    JsonElement dataEl = obj.get("data");
-                    if (dataEl != null && dataEl.isJsonPrimitive()) {
-                        tvResult.setText(dataEl.getAsString());
-                        return;
-                    }
-                }
-            } catch (Exception ignored) {
-                // 返回体不是预期的 JSON 时直接落到下方的「原样显示」，不能因此不显示内容。
-            }
-        }
-
-        // type=2/3 以及其它情况：原样显示服务端返回内容
-        tvResult.setText(result);
-    }
-
-    /** 解析结果里的坐标并在预览图上画框。 */
-    private void drawBoxesOnPreview(String path, String result) {
-        Bitmap base = decodeSampled(path, 1600);
-        if (base == null) {
-            return;
-        }
-        Bitmap mutable = base.copy(Bitmap.Config.ARGB_8888, true);
-        base.recycle();
-        if (mutable == null) {
-            return;
-        }
-        drawBoxes(mutable, result);
-    }
-
-    /** 在给定位图上画出识别框。 */
-    private void drawBoxes(Bitmap target, String result) {
-        try {
-            JsonElement el = JsonParser.parseString(result);
-            if (!el.isJsonObject()) {
-                return;
-            }
-            JsonObject obj = el.getAsJsonObject();
-            if (!obj.has("status") || obj.get("status").getAsInt() != 200) {
-                return;
-            }
-            JsonElement dataEl = obj.get("data");
-            if (dataEl == null || !dataEl.isJsonArray()) {
-                return;
-            }
-            JsonArray arr = dataEl.getAsJsonArray();
-            if (arr.size() == 0) {
-                showBitmap(target);
-                return;
-            }
-
-            Canvas canvas = new Canvas(target);
-            Paint paint = new Paint();
-            paint.setAntiAlias(true);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(Math.max(2f, target.getWidth() / 500f));
-            paint.setColor(0xFF12B76A);
-
-            int w = target.getWidth();
-            int h = target.getHeight();
-
-            // ===== 坐标换算（关键修复）=====
-            // 识别返回的 x/y/w/h 是相对「送入引擎的位图」的像素值，
-            // 而 target 是预览用的缩略图（decodeSampled 会按 inSampleSize 降采样）。
-            // 二者分辨率不同，直接画会导致框整体放大、往右下偏移，
-            // 再被裁剪贴边——这就是"画到缩略图上不准"的原因。
-            int srcW = OCRService.lastOcrImageWidth;
-            int srcH = OCRService.lastOcrImageHeight;
-            float sx = (srcW > 0) ? (float) w / (float) srcW : 1f;
-            float sy = (srcH > 0) ? (float) h / (float) srcH : 1f;
-
-            for (JsonElement item : arr) {
-                if (!item.isJsonObject()) {
-                    continue;
-                }
-                JsonObject o = item.getAsJsonObject();
-                int x = getInt(o, "x", -1);
-                int y = getInt(o, "y", -1);
-                int bw = getInt(o, "w", -1);
-                int bh = getInt(o, "h", -1);
-
-                // 兼容 left/top/right/bottom 形式
-                if (x < 0 || y < 0 || bw <= 0 || bh <= 0) {
-                    int left = getInt(o, "left", -1);
-                    int top = getInt(o, "top", -1);
-                    int right = getInt(o, "right", -1);
-                    int bottom = getInt(o, "bottom", -1);
-                    if (left >= 0 && top >= 0 && right > 0 && bottom > 0) {
-                        x = left;
-                        y = top;
-                        bw = right - left;
-                        bh = bottom - top;
-                    }
-                }
-                if (x < 0 || y < 0 || bw <= 0 || bh <= 0) {
-                    continue;
-                }
-
-                int l = Math.max(0, Math.round(x * sx));
-                int t = Math.max(0, Math.round(y * sy));
-                int r = Math.min(w, Math.round((x + bw) * sx));
-                int b = Math.min(h, Math.round((y + bh) * sy));
-                if (r <= l || b <= t) {
-                    continue;
-                }
-
-                canvas.drawRect(new RectF(l, t, r, b), paint);
-            }
-
-            // 先切换再回收，且绝不能回收正在显示的这张。
-            // 原写法先 recycle 再 showBitmap，当 target == previewBitmap 时
-            // 会把即将显示的位图回收掉，导致 "trying to use a recycled bitmap" 崩溃。
-            Bitmap old = previewBitmap;
-            previewBitmap = target;
-            showBitmap(target);
-            if (old != null && old != target && !old.isRecycled()) {
-                old.recycle();
-            }
-        } catch (Exception ignored) {
-            // 此处已在 showBitmap 之后，回收失败只会漏一张旧位图，绝不能让它把新图带崩。
-        }
-    }
-
-    private int getInt(JsonObject o, String key, int def) {
-        try {
-            if (!o.has(key) || o.get(key).isJsonNull()) {
-                return def;
-            }
-            JsonElement e = o.get(key);
-            if (e.getAsJsonPrimitive().isNumber()) {
-                return (int) e.getAsDouble();
-            }
-            return (int) Double.parseDouble(e.getAsString());
-        } catch (Exception ex) {
-            return def;
-        }
-    }
-
-    // ============================================================
-    //  网络请求
-    // ============================================================
-
-    private String doHttpRequest(String path, int type) {
-        // 【修复⑪】原来这里是一整份自写的 HttpURLConnection 实现，
-        // 与 Http.post() / postJson() 三份几乎重复，改动极易漏改。
-        // 现在统一复用 Http.post：
-        //   · 端口来自 OCRService.HTTP_PORT（唯一来源）
-        //   · 超时保持原值：连接 10s / 读取 60s（大图 + rapid 档确实慢）
-        // 返回 null（连接/读取失败）时再转成原来的提示文案，界面表现不变。
-        String json;
-        if (path == null || path.length() == 0) {
-            json = "{\"type\":" + type + "}";
-        } else {
-            json = "{\"path\":\"" + path.replace("\\", "\\\\") + "\",\"type\":" + type + "}";
-        }
-
-        String resp = Http.post(this, json, 10000, 60000);
-        if (resp == null) {
-            return "请求失败：服务未响应"
-                    + "\n\n服务可能仍在加载模型，请稍等几秒后重试。";
-        }
-        if (resp.length() == 0) {
-            return "{\"status\": 200, \"data\": \"无返回内容，服务可能仍在加载模型\"}";
-        }
-        return resp;
-    }
-
-    // ============================================================
-    //  保活设置
-    // ============================================================
 
     private boolean isIgnoringBatteryOptimizations() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
@@ -1928,10 +351,6 @@ public class MainActivity extends AppCompatActivity {
             toast("当前系统版本无需设置");
             return;
         }
-        if (isIgnoringBatteryOptimizations()) {
-            toast("已在白名单中，无需重复设置");
-            return;
-        }
         try {
             Intent intent = new Intent(
                     android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
@@ -1941,127 +360,23 @@ public class MainActivity extends AppCompatActivity {
             try {
                 startActivity(new Intent(
                         android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-                toast("请找到 小孙OCR 并设为「不限制」");
+                toast("请找到 Grace 并设为「不限制」");
             } catch (Exception e2) {
                 toast("请手动到 设置-电池 关闭本应用限制");
             }
         }
     }
 
-    // ============================================================
-    //  通用 UI
-    // ============================================================
-
-    private void addSectionTitle(ViewGroup parent, String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(14);
-        tv.setTypeface(null, Typeface.BOLD);
-        tv.setTextColor(C_TEXT);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(18);
-        lp.bottomMargin = dp(10);
-        tv.setLayoutParams(lp);
-        parent.addView(tv);
-    }
-
-    private void addCard(ViewGroup parent, View card) {
-        parent.addView(card, cardLp());
-    }
-
-    private LinearLayout.LayoutParams cardLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(12);
-        return lp;
-    }
-
-    private GradientDrawable borderedBg(int fill, int stroke, float radiusDp) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(fill);
-        d.setCornerRadius(dp(radiusDp));
-        d.setStroke(dp(1f), stroke);
-        return d;
-    }
-
-    private void styleInput(EditText et) {
-        et.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 12));
-        et.setPadding(dp(14), dp(12), dp(14), dp(12));
-        et.setTextSize(13.5f);
-        et.setTextColor(C_TEXT);
-        et.setHintTextColor(C_HINT);
-    }
-
-    private LinearLayout.LayoutParams inputLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(2);
-        return lp;
-    }
-
-    private LinearLayout.LayoutParams weightLp() {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(42), 1f);
-        lp.setMargins(dp(4), dp(4), dp(4), dp(4));
-        return lp;
-    }
-
-    private Button primaryButton(String text) {
-        Button btn = new Button(this);
-        btn.setText(text);
-        btn.setTextSize(14.5f);
-        btn.setAllCaps(false);
-        btn.setTextColor(Color.WHITE);
-        btn.setTypeface(null, Typeface.BOLD);
-        btn.setStateListAnimator(null);
-
-        GradientDrawable base = new GradientDrawable();
-        base.setColor(C_BRAND);
-        base.setCornerRadius(dp(12));
-        RippleDrawable ripple = new RippleDrawable(
-                ColorStateList.valueOf(0x33FFFFFF), base, null);
-        btn.setBackground(ripple);
-        return btn;
-    }
-
-    private Button secondaryButton(String text, View.OnClickListener listener) {
-        Button btn = new Button(this);
-        btn.setText(text);
-        btn.setTextSize(12.5f);
-        btn.setAllCaps(false);
-        btn.setTextColor(C_BRAND);
-        btn.setTypeface(null, Typeface.BOLD);
-        btn.setStateListAnimator(null);
-
-        GradientDrawable base = new GradientDrawable();
-        base.setColor(C_BRAND_SOFT);
-        base.setCornerRadius(dp(12));
-        RippleDrawable ripple = new RippleDrawable(
-                ColorStateList.valueOf(0x334F6BED), base, null);
-        btn.setBackground(ripple);
-        btn.setOnClickListener(listener);
-        return btn;
-    }
-
-    private int dp(float value) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
-                getResources().getDisplayMetrics());
-    }
-
-    private void toast(String msg) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
-    }
-
     private void requestPermissionsIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
+            if (!android.os.Environment.isExternalStorageManager()) {
                 try {
                     Intent intent = new Intent(
                             android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
                     intent.setData(Uri.parse("package:" + getPackageName()));
                     startActivity(intent);
                 } catch (Exception ignored) {
-                    // 个别 ROM 没有这个设置页，startActivity 会抛 ActivityNotFound；失败就停在当前页。
+                    // 个别 ROM 没有这个设置页，失败就停在当前页。
                 }
             }
         } else {
@@ -2075,6 +390,63 @@ public class MainActivity extends AppCompatActivity {
                 ActivityCompat.requestPermissions(this,
                         new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
             }
+        }
+    }
+
+    // ============================================================
+    //  通用 UI
+    // ============================================================
+
+    private void addSectionTitle(ViewGroup parent, String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextSize(13);
+        tv.setTypeface(null, Typeface.BOLD);
+        tv.setTextColor(C_SUB);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(this, 18);
+        lp.bottomMargin = dp(this, 2);
+        parent.addView(tv, lp);
+    }
+            private void toast(String msg) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+    }
+
+    // ============================================================
+    //  功能项定义
+    // ============================================================
+
+    /**
+     * 首页的功能列表。
+     *
+     * 新增功能只需：写一个二级页 Activity + 提供 static open(Context)，
+     * 然后在这里追加一项。首页布局与点击路由都不需要改。
+     *
+     * <p>2.6 起不再有「状态取值器」这一项 —— 卡片上不显示状态文字了。
+     */
+    private Feature[] features() {
+        return new Feature[]{
+                new Feature("文", "文字识别", () -> OcrActivity.open(this)),
+                new Feature("手", "边缘手势", () -> EdgeGestureActivity.open(this)),
+                // 第三个大功能：用 root 直接开关任意应用的无障碍服务。
+                // 它和上面两项同性质 —— 一个独立的能力，不是谁的子设置。
+                new Feature("障", "无障碍管理", () -> A11yActivity.open(this)),
+                // 第四个大功能：CPU / 内存 / GPU / 温度 / 电池一屏看完。
+                new Feature("览", "设备概览", () -> DeviceOverviewActivity.open(this)),
+        };
+    }
+
+    /** 首页上的一个功能入口：图标里的字、名字、点进去做什么。 */
+    private static final class Feature {
+        final String icon;
+        final String name;
+        final Runnable action;
+
+        Feature(String icon, String name, Runnable action) {
+            this.icon = icon;
+            this.name = name;
+            this.action = action;
         }
     }
 }

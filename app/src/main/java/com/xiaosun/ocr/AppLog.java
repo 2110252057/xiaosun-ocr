@@ -345,7 +345,7 @@ public final class AppLog {
             synchronized (TS) {
                 stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
             }
-            File dst = new File(dir, "小孙OCR日志_" + stamp + ".txt");
+            File dst = new File(dir, "Grace日志_" + stamp + ".txt");
             copy(src, dst);
             return dst;
         } catch (Throwable t) {
@@ -368,7 +368,7 @@ public final class AppLog {
             Intent it = new Intent(Intent.ACTION_SEND);
             it.setType("text/plain");
             it.putExtra(Intent.EXTRA_STREAM, uri);
-            it.putExtra(Intent.EXTRA_SUBJECT, "小孙OCR 日志");
+            it.putExtra(Intent.EXTRA_SUBJECT, "Grace 日志");
             if (extraText != null) it.putExtra(Intent.EXTRA_TEXT, extraText);
             it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             Intent chooser = Intent.createChooser(it, "发送日志");
@@ -410,7 +410,7 @@ public final class AppLog {
     public static String deviceInfo(Context c) {
         StringBuilder sb = new StringBuilder();
         try {
-            sb.append("应用: 小孙OCR ").append("v").append(versionName(c)).append('\n');
+            sb.append("应用: Grace ").append("v").append(versionName(c)).append('\n');
             sb.append("系统: Android ").append(Build.VERSION.RELEASE)
                     .append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
             sb.append("机型: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)

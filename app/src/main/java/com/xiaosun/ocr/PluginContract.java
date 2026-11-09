@@ -184,8 +184,52 @@ public final class PluginContract {
     public static final String KEY_PATH = "path";
     /** 档位：tiny / small / rapid。 */
     public static final String KEY_TIER = "tier";
-    /** 输出格式：1=纯文本 2=含坐标。 */
+    /**
+     * 输出格式。取值与 OCR 接口的 {@code type} 参数完全一致：
+     *   1 = 文本      每行只有文字
+     *   2 = 坐标      每行「[x,y] 文字」
+     *   3 = 矩形      每行「[x,y,w,h] 文字」
+     *
+     * 【为什么这里和三档对齐，而不是只留「文本 / 含坐标」两档】
+     * 原来只给两档，是因为回传的变量只有「文本」这一串，
+     * 有没有坐标只影响拼接样式。但两档没法表达「我要宽高」——
+     * 而宽高恰恰是做「点这一行文字的中心」时必须的（只知道 x,y
+     * 只能点到左上角，点到字的外面就点不中）。
+     *
+     * 【注意：实际请求固定用 type=2 或 3，不会发 1】
+     * 原因见 PluginFireReceiver 里的注释：坐标变量（x/y）需要响应里
+     * 带 x/y，type=1 的响应压根没有坐标。本项只决定**拼接样式**。
+     */
     public static final String KEY_TYPE = "type";
+    /**
+     * 是否用「识别区域」。0=整屏（默认） 1=只识别一块区域。
+     *
+     * <p>【这个键只表示「用不用」，不存坐标】真正那块区域始终在
+     * {@link OcrRegion}（xsocr_prefs / ocr_region）里，是全局唯一一份，
+     * App 的「设区域…」和插件的「框选区域…」写的是同一个键。
+     * 这样在哪儿改都一样生效，不会出现两份数据互相覆盖。
+     */
+    public static final String KEY_USE_REGION = "useRegion";
+
+    /**
+     * 识别区域本身，"left,top,right,bottom"，0~1 归一化比例。
+     *
+     * <p>2.15 起插件自己也能框选，但框完仍然写 {@link OcrRegion}，
+     * 所以这个键**只存空串**，纯粹为了兼容旧配置里可能存在的值。
+     * 运行时一律以 OcrRegion.load() 为准。
+     */
+    public static final String KEY_REGION = "region";
+
+    /**
+     * 截屏方式：accessibility / root / projection。
+     *
+     * <p>【为什么不再让服务端「轮着试」】用户选了某一种，就是要那种方式的图：
+     * 无障碍截图在部分机型上会带上系统提示条、投屏在播放类应用上可能是黑屏。
+     * 服务端悄悄换成另一条路，结果会莫名其妙地不同，而用户完全不知道
+     * 拿到的是另一条路的产物。所以这里指定了方式，服务端就只用那一条，
+     * 不可用就明确报错（见 OCRService.captureByMode）。
+     */
+    public static final String KEY_CAPTURE = "capture";
     /** 是否用换行连接多行文本（默认是）。 */
     public static final String KEY_JOIN_NEWLINE = "joinNewline";
 
@@ -510,7 +554,10 @@ public final class PluginContract {
      *   必须全小写、`%` 开头、只含字母数字下划线。
      */
     public static final String[] ALL_VARIABLES = {
-            VAR_TEXT  + "\n识别文本\n识别出的全部文字（多行用换行连接）",
+            // 说明里点明「可能带坐标前缀」：选坐标/矩形档时这一串是
+            // "[x,y] 文字" / "[x,y,w,h] 文字"，宏里若做文本比较
+            // （如「包含某某」）必须把前缀考虑进去，否则永远匹配不上。
+            VAR_TEXT  + "\n识别文本\n识别出的全部文字（多行用换行连接）；坐标/矩形档每行前面带 [x,y] 或 [x,y,w,h]",
             VAR_MATCH + "\n是否找到\n指定的文本是否存在（true / false）",
             VAR_X     + "\n坐标X\n指定文本命中处的 x 坐标（整数）",
             VAR_Y     + "\n坐标Y\n指定文本命中处的 y 坐标（整数）",

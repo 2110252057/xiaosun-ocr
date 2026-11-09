@@ -32,7 +32,7 @@ import java.util.List;
  *   2. 把「方向 / 手柄名 / 事件类型 / 序号」写进静态字段，
  *      插件（PluginFireReceiver）触发时就能读到，回传给宏。
  *
- * 也就是说：手势 → 宏 → 小孙OCR 插件 → OCR → 变量，全程闭环。
+ * 也就是说：手势 → 宏 → Grace 插件 → OCR → 变量，全程闭环。
  *
  * ════════════════════════════════════════════════════════════════
  * 【为什么配置存 JSON 字符串】
@@ -57,6 +57,8 @@ public final class EdgeGesturePrefs {
     private static final String KEY_MENU_ICON_DP = "menu_icon_dp";
     private static final String KEY_MENU_SHOW_TEXT = "menu_show_text";
     private static final String KEY_MENU_LAYOUT = "menu_layout";
+    /** 环形布局的半径（dp）；0 = 由服务按项数自动算。 */
+    private static final String KEY_MENU_RING_RADIUS = "menu_ring_radius";
     /** 防烧屏漂移：总开关 / 幅度(dp) / 间隔(秒)。 */
     private static final String KEY_BURNIN = "burnin";
     private static final String KEY_BURNIN_RANGE = "burnin_range";
@@ -447,13 +449,57 @@ public final class EdgeGesturePrefs {
         sp(c).edit().putBoolean(KEY_MENU_ENABLED, on).apply();
     }
 
-    /** 菜单项的原始文本（每行 `文字|source`）。 */
-    public static String getMenuItemsRaw(Context c) {
-        return sp(c).getString(KEY_MENU_ITEMS, "");
-    }
+    /**
+     * 首次使用时的默认菜单项 —— 三项。
+     *
+     * <p>【为什么要有默认值】原来这里是空串：装完 App 打开滑动菜单，看到的是一片空白，
+     * 还得自己一项一项加。用户不知道「该加什么」才是最大的门槛。
+     * 预置三个用途最广的动作，装完就能直接滑出来用，不想要再删。
+     *
+     * <p>三个名字都选了**通用**的动词（截图 / 回主页 / 返回），不预设用户装了什么 App。
+     * 动作值故意写成 {@code act_xxx} 而不是中文：宏侧收到的是这个串，
+     * 中文串在 Tasker / MacroDroid 的变量条件里容易因为编码或空格出问题，
+     * 而 {@code act_home} 这种一眼能认、且不会和别的变量值撞车。
+     */
+    private static final String DEFAULT_MENU_ITEMS =
+            "截图||act_screenshot\n"
+                    + "回主页||act_home\n"
+                    + "返回||act_back";
 
+    /**
+     * 是否已经写过一次菜单项。
+     *
+     * <p>用它把「从没配过」和「用户主动删光了」区分开：
+     * 只认前者。否则用户删空 → 下次进来又冒出三项默认值，
+     * 删了又长，像删不掉一样。
+     */
+    private static final String KEY_MENU_ITEMS_SEEDED = "menu_items_seeded";
+
+    /**
+     * 菜单项的原始文本（每行 `文字|图标|动作`）。
+     *
+     * <p>读取时若「从没写过」，顺手写入默认三项并置 {@link #KEY_MENU_ITEMS_SEEDED}。
+     * 这里用 {@code commit()} 而不是 {@code apply()}：紧接着 {@link #getMenuItems}
+     * 就会把结果拿去渲染，异步落盘期间若进程被杀，下次读到的还是空，
+     * 默认项等于白给。一次同步写（几十字节）换确定性，值得。
+     */
+    public static String getMenuItemsRaw(Context c) {
+        SharedPreferences p = sp(c);
+        if (p.getBoolean(KEY_MENU_ITEMS_SEEDED, false)) {
+            return p.getString(KEY_MENU_ITEMS, "");
+        }
+        p.edit()
+                .putString(KEY_MENU_ITEMS, DEFAULT_MENU_ITEMS)
+                .putBoolean(KEY_MENU_ITEMS_SEEDED, true)
+                .commit();
+        return DEFAULT_MENU_ITEMS;
+    }
     public static void setMenuItemsRaw(Context c, String raw) {
-        sp(c).edit().putString(KEY_MENU_ITEMS, raw == null ? "" : raw).apply();
+        // 用户显式写过（哪怕写成空串）就算「配过了」，之后不再补默认值。
+        sp(c).edit()
+                .putString(KEY_MENU_ITEMS, raw == null ? "" : raw)
+                .putBoolean(KEY_MENU_ITEMS_SEEDED, true)
+                .apply();
     }
 
     /** 菜单项的解析结果（每次现解，量很小，不值得缓存）。 */
@@ -484,16 +530,41 @@ public final class EdgeGesturePrefs {
     }
 
     /**
-     * 布局：斜排 —— 沿 45° 斜线从左下往右上排开，放不下时在上方再加一排。
+     * 菜单布局。
      *
-     * 早期还有「底部横排」与「环形」两种，已废弃；老配置里读到 bar/circle 一律按斜排处理。
+     * 目前两种：
+     *   {@link #MENU_LAYOUT_ARC}  —— 斜排：从触发点起沿 45° 斜线排开
+     *   {@link #MENU_LAYOUT_RING} —— 环形：以触发点为圆心，绕一圈均匀分布
+     *
+     * 早期还有「底部横排」，老配置里读到 bar 一律按斜排处理。
      */
     public static final String MENU_LAYOUT_ARC = "arc";
+    public static final String MENU_LAYOUT_RING = "ring";
+
     public static String getMenuLayout(Context c) {
-        return MENU_LAYOUT_ARC;
+        String v = sp(c).getString(KEY_MENU_LAYOUT, MENU_LAYOUT_ARC);
+        // 只认这两个值。历史上存过 bar/circle，一律当斜排，
+        // 免得老用户升级后菜单突然变成不认识的形状。
+        return MENU_LAYOUT_RING.equals(v) ? MENU_LAYOUT_RING : MENU_LAYOUT_ARC;
     }
+
     public static void setMenuLayout(Context c, String layout) {
-        sp(c).edit().putString(KEY_MENU_LAYOUT, MENU_LAYOUT_ARC).apply();
+        String v = MENU_LAYOUT_RING.equals(layout) ? MENU_LAYOUT_RING : MENU_LAYOUT_ARC;
+        sp(c).edit().putString(KEY_MENU_LAYOUT, v).apply();
+    }
+
+    /**
+     * 环形布局的半径（dp）。
+     *
+     * 指的是圆心到图标中心的距离。设为 0 或负数时由服务按项数自动算一个
+     * 「刚好放得下」的半径，所以这个值本质上是「手动微调」而不是必填项。
+     */
+    public static int getMenuRingRadius(Context c) {
+        return clamp(sp(c).getInt(KEY_MENU_RING_RADIUS, 0), 0, 400);
+    }
+
+    public static void setMenuRingRadius(Context c, int dp) {
+        sp(c).edit().putInt(KEY_MENU_RING_RADIUS, clamp(dp, 0, 400)).apply();
     }
     /**
      * 斜排「每排最多放几项」。

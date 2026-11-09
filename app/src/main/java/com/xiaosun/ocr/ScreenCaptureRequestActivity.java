@@ -102,7 +102,7 @@ public class ScreenCaptureRequestActivity extends Activity {
         if (!canStartFromBackground()) {
             Log.w(TAG, "缺少悬浮窗权限，无法在后台弹出授权框");
             Toast.makeText(this,
-                    "请先在「小孙OCR」中开启「悬浮窗权限」，插件才能自动申请截屏",
+                    "请先在「Grace」中开启「悬浮窗权限」，插件才能自动申请截屏",
                     Toast.LENGTH_LONG).show();
             notifyResult(false);
             finish();

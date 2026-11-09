@@ -11,11 +11,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.DisplayMetrics;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -30,6 +28,9 @@ import androidx.appcompat.app.AppCompatActivity;
 
 import java.util.ArrayList;
 import java.util.List;
+
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
  * 单个滑动手柄的「编辑」页。
@@ -68,13 +69,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
 
     public static final String EXTRA_HANDLE_ID = "handle_id";
 
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_SURFACE = 0xFFFFFFFF;
-    private static final int C_DANGER = 0xFFF04438;
+    /** 页面底色 —— 顶栏也用它，两者同色才看不出分界。 */
 
     /** 9 个预置色 —— 从冷淡到鲜艳，覆盖常见选择。 */
     private static final int[] PALETTE = {
@@ -128,7 +123,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(14), dp(20), dp(110));   // 底部留白给浮动按钮
+        content.setPadding(dp(this, 20), dp(this, 14), dp(this, 20), dp(this, 110));   // 底部留白给浮动按钮
 
         buildNameSection(content);
         buildEdgeSection(content);
@@ -170,23 +165,23 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(C_BRAND);
-        bar.setPadding(dp(8), dp(14), dp(8), dp(14));
+        bar.setBackgroundColor(C_BG);
+        bar.setPadding(dp(this, 8), dp(this, 14), dp(this, 8), dp(this, 14));
 
         // 返回
         TextView back = new TextView(this);
         back.setText("←");
         back.setTextSize(24);
-        back.setTextColor(Color.WHITE);
+        back.setTextColor(C_TEXT);
         back.setGravity(Gravity.CENTER);
         back.setOnClickListener(v -> finish());
-        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(back, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
 
         TextView title = new TextView(this);
         title.setText("编辑滑动手柄");
         title.setTextSize(18);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(C_TEXT);
         title.setGravity(Gravity.CENTER);
         bar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -195,10 +190,12 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         TextView del = new TextView(this);
         del.setText("🗑");
         del.setTextSize(19);
-        del.setTextColor(Color.WHITE);
+        // 破坏性操作用警示红，不用常规文字色 —— 原来是白字（在蓝底上），
+        // 底色变浅后如果一并转成深灰，就跟标题一个份量了。
+        del.setTextColor(C_DANGER);
         del.setGravity(Gravity.CENTER);
         del.setOnClickListener(v -> confirmDelete());
-        bar.addView(del, new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(del, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
 
         return bar;
     }
@@ -214,18 +211,18 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         bg.setShape(GradientDrawable.OVAL);
         bg.setColor(Color.WHITE);
         fab.setBackground(bg);
-        fab.setElevation(dp(8));
+        fab.setElevation(dp(this, 8));
         fab.setOnClickListener(v -> finish());
         // 让点击热区比视觉圆形更大一点，符合 Material 的习惯
-        fab.setPadding(dp(4), dp(4), dp(4), dp(4));
+        fab.setPadding(dp(this, 4), dp(this, 4), dp(this, 4), dp(this, 4));
         return fab;
     }
 
     private FrameLayout.LayoutParams fabParams() {
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(60), dp(60));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(this, 60), dp(this, 60));
         lp.gravity = Gravity.END | Gravity.BOTTOM;
-        lp.rightMargin = dp(22);
-        lp.bottomMargin = dp(28);
+        lp.rightMargin = dp(this, 22);
+        lp.bottomMargin = dp(this, 28);
         return lp;
     }
 
@@ -247,7 +244,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         nameView.setBackground(new GradientDrawable() {{
             setColor(Color.TRANSPARENT);
         }});
-        nameView.setPadding(0, dp(6), 0, dp(6));
+        nameView.setPadding(0, dp(this, 6), 0, dp(this, 6));
         nameView.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
             @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
@@ -261,7 +258,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         View line = new View(this);
         line.setBackgroundColor(C_DIVIDER);
         parent.addView(line, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 1)));
     }
 
     // ============================================================
@@ -281,19 +278,19 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.HORIZONTAL);
             item.setGravity(Gravity.CENTER_VERTICAL);
-            item.setPadding(0, dp(8), dp(10), dp(8));
+            item.setPadding(0, dp(this, 8), dp(this, 10), dp(this, 8));
 
             TextView radio = new TextView(this);
             radio.setTextSize(11);
             radio.setGravity(Gravity.CENTER);
             marks[i] = radio;
-            item.addView(radio, new LinearLayout.LayoutParams(dp(24), dp(24)));
+            item.addView(radio, new LinearLayout.LayoutParams(dp(this, 24), dp(this, 24)));
 
             TextView txt = new TextView(this);
             txt.setText(side == 0 ? "左" : "右");
             txt.setTextSize(15);
             txt.setTextColor(C_TEXT);
-            txt.setPadding(dp(6), 0, 0, 0);
+            txt.setPadding(dp(this, 6), 0, 0, 0);
             item.addView(txt);
 
             item.setOnClickListener(v -> {
@@ -315,7 +312,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             GradientDrawable g = new GradientDrawable();
             g.setShape(GradientDrawable.OVAL);
             g.setColor(Color.TRANSPARENT);
-            g.setStroke(dp(2), on ? C_BRAND : C_HINT);
+            g.setStroke(dp(this, 2), on ? C_BRAND : C_HINT);
             marks[i].setBackground(g);
             marks[i].setText(on ? "●" : "");
             marks[i].setTextColor(C_BRAND);
@@ -332,8 +329,8 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         parent.addView(label("预览"), topMargin(16));
         preview = new PreviewStrip(this);
         LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(190));
-        pl.topMargin = dp(6);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 190));
+        pl.topMargin = dp(this, 6);
         parent.addView(preview, pl);
 
         PreviewLegend legend = new PreviewLegend(this);
@@ -343,7 +340,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         // ★ 这一项决定「好不好按」，必须和下面的手柄条同宽（不再单独暴露"可视宽度"，
         //   否则两个宽度会互相矛盾、让人对不上）。
         LinearLayout.LayoutParams wlp = wide();
-        wlp.topMargin = dp(18);
+        wlp.topMargin = dp(this, 18);
         parent.addView(label("宽度（手柄条）"), wlp);
 
         buildWidthSlider(parent);
@@ -384,7 +381,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         val.setTextColor(C_BRAND);
         val.setTypeface(null, android.graphics.Typeface.BOLD);
         val.setGravity(Gravity.END);
-        row.addView(val, new LinearLayout.LayoutParams(dp(64),
+        row.addView(val, new LinearLayout.LayoutParams(dp(this, 64),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         SeekBar sb = new SeekBar(this);
@@ -456,7 +453,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             g.setColor(c);
             // 当前选中的加一圈描边
             if ((c & 0x00FFFFFF) == (handle.color & 0x00FFFFFF)) {
-                g.setStroke(dp(2), C_BRAND);
+                g.setStroke(dp(this, 2), C_BRAND);
             }
             dot.setBackground(g);
             dot.setOnClickListener(v -> {
@@ -465,8 +462,8 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
                 refreshPreview();
                 persist(true);
             });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(30), dp(30));
-            lp.setMarginEnd(dp(10));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(this, 30), dp(this, 30));
+            lp.setMarginEnd(dp(this, 10));
             colorRow.addView(dot, lp);
         }
 
@@ -478,9 +475,9 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         GradientDrawable cg = new GradientDrawable();
         cg.setShape(GradientDrawable.OVAL);
         cg.setColor(handle.color);
-        cg.setStroke(dp(2), C_DIVIDER);
+        cg.setStroke(dp(this, 2), C_DIVIDER);
         cur.setBackground(cg);
-        colorRow.addView(cur, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        colorRow.addView(cur, new LinearLayout.LayoutParams(dp(this, 44), dp(this, 44)));
     }
 
     // ============================================================
@@ -558,7 +555,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             warn.setText("⚠ Android 10 以下没有「屏蔽系统手势」的平台接口，"
                     + "本开关不会生效。可把手柄挪离屏幕边缘，或改用三键导航。");
             LinearLayout.LayoutParams wl = wide();
-            wl.topMargin = dp(6);
+            wl.topMargin = dp(this, 6);
             parent.addView(warn, wl);
         }
 
@@ -566,7 +563,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(8), 0, dp(8));
+        row.setPadding(0, dp(this, 8), 0, dp(this, 8));
 
         final CheckBox cb = new CheckBox(this);
         cb.setChecked(handle.blockGesture);
@@ -574,14 +571,14 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             handle.blockGesture = checked;
             persist(true);
         });
-        row.addView(cb, new LinearLayout.LayoutParams(dp(44),
+        row.addView(cb, new LinearLayout.LayoutParams(dp(this, 44),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView txt = new TextView(this);
         txt.setText("屏蔽本条手柄区域的系统手势");
         txt.setTextSize(14f);
         txt.setTextColor(C_TEXT);
-        txt.setPadding(dp(6), 0, 0, 0);
+        txt.setPadding(dp(this, 6), 0, 0, 0);
         txt.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
         row.addView(txt, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -614,7 +611,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         TextView summary = new TextView(this);
         summary.setTextSize(11.5f);
         summary.setLineSpacing(0f, 1.4f);
-        summary.setPadding(dp(12), dp(9), dp(12), dp(9));
+        summary.setPadding(dp(this, 12), dp(this, 9), dp(this, 12), dp(this, 9));
         summary.setBackground(roundBg(0x0F4F6BED));
         menuSummary = summary;
         refreshMenuSummary(summary);
@@ -643,10 +640,10 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         });
         LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        lp1.rightMargin = dp(5);
+        lp1.rightMargin = dp(this, 5);
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        lp2.leftMargin = dp(5);
+        lp2.leftMargin = dp(this, 5);
         bulk.addView(onlyMenu, lp1);
         bulk.addView(onlyDirect, lp2);
         parent.addView(bulk, topMargin(8));
@@ -657,7 +654,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(0, dp(6), 0, dp(6));
+            row.setPadding(0, dp(this, 6), 0, dp(this, 6));
 
             CheckBox cb = new CheckBox(this);
             cb.setChecked(handle.enabled[dir]);
@@ -665,7 +662,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
                 handle.enabled[dir] = checked;
                 persist(true);
             });
-            row.addView(cb, new LinearLayout.LayoutParams(dp(44),
+            row.addView(cb, new LinearLayout.LayoutParams(dp(this, 44),
                     ViewGroup.LayoutParams.WRAP_CONTENT));
 
             TextView arrow = new TextView(this);
@@ -673,14 +670,14 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             arrow.setTextSize(18);
             arrow.setTextColor(C_BRAND);
             arrow.setGravity(Gravity.CENTER);
-            row.addView(arrow, new LinearLayout.LayoutParams(dp(30),
+            row.addView(arrow, new LinearLayout.LayoutParams(dp(this, 30),
                     ViewGroup.LayoutParams.WRAP_CONTENT));
 
             TextView name = new TextView(this);
             name.setText(EdgeGesturePrefs.DIR_LABELS[dir]);
             name.setTextSize(14.5f);
             name.setTextColor(C_TEXT);
-            name.setPadding(dp(8), 0, 0, 0);
+            name.setPadding(dp(this, 8), 0, 0, 0);
             row.addView(name, new LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -689,10 +686,10 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             updateDistText(dist, dir);
             dist.setTextSize(13);
             dist.setTextColor(handle.distance[dir] > 0 ? C_BRAND : C_HINT);
-            dist.setPadding(dp(10), dp(4), dp(10), dp(4));
+            dist.setPadding(dp(this, 10), dp(this, 4), dp(this, 10), dp(this, 4));
             GradientDrawable db = new GradientDrawable();
             db.setColor(0x0F4F6BED);
-            db.setCornerRadius(dp(8));
+            db.setCornerRadius(dp(this, 8));
             dist.setBackground(db);
             dist.setOnClickListener(v -> promptDistance(dir, dist));
             row.addView(dist);
@@ -702,11 +699,11 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             // CheckBox 省地方（这一行已经有勾选框、箭头、名字、距离了）。
             final TextView mode = new TextView(this);
             mode.setTextSize(12.5f);
-            mode.setPadding(dp(9), dp(4), dp(9), dp(4));
+            mode.setPadding(dp(this, 9), dp(this, 4), dp(this, 9), dp(this, 4));
             applyPill(mode, dir);
             LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            mlp.leftMargin = dp(8);
+            mlp.leftMargin = dp(this, 8);
             mode.setOnClickListener(v -> {
                 handle.menuByDir[dir] = !handle.menuByDir[dir];
                 applyPill(mode, dir);
@@ -786,7 +783,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         tv.setTextSize(12.5f);
         tv.setTextColor(color);
         tv.setGravity(Gravity.CENTER);
-        tv.setPadding(dp(9), dp(8), dp(9), dp(8));
+        tv.setPadding(dp(this, 9), dp(this, 8), dp(this, 9), dp(this, 8));
         tv.setBackground(roundBg(bg));
     }
 
@@ -800,7 +797,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
     private GradientDrawable roundBg(int argb) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(argb);
-        d.setCornerRadius(dp(8));
+        d.setCornerRadius(dp(this, 8));
         return d;
     }
     private void updateDistText(TextView tv, int dir) {
@@ -815,7 +812,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         et.setHint(String.valueOf(handle.threshold));
         et.setText(handle.distance[dir] > 0 ? String.valueOf(handle.distance[dir]) : "");
         et.setTextSize(15);
-        et.setPadding(dp(16), dp(10), dp(16), dp(10));
+        et.setPadding(dp(this, 16), dp(this, 10), dp(this, 16), dp(this, 10));
 
         new androidx.appcompat.app.AlertDialog.Builder(this)
                 .setTitle("「" + EdgeGesturePrefs.DIR_LABELS[dir] + "」触发距离")
@@ -931,7 +928,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         val.setTextColor(C_BRAND);
         val.setTypeface(null, android.graphics.Typeface.BOLD);
         val.setGravity(Gravity.END);
-        row.addView(val, new LinearLayout.LayoutParams(dp(64),
+        row.addView(val, new LinearLayout.LayoutParams(dp(this, 64),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         SeekBar sb = new SeekBar(this);
@@ -976,23 +973,13 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
         return tv;
     }
 
-    private LinearLayout.LayoutParams wide() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams topMargin(int dp) {
+        private LinearLayout.LayoutParams topMargin(int dp) {
         LinearLayout.LayoutParams lp = wide();
-        lp.topMargin = dp(dp);
+        lp.topMargin = dp(this, dp);
         return lp;
     }
 
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
-    }
-
-    /** 供列表页复用：启动编辑器。 */
+        /** 供列表页复用：启动编辑器。 */
     public static void open(android.content.Context ctx, int handleId) {
         Intent i = new Intent(ctx, EdgeGestureEditorActivity.class);
         i.putExtra(EXTRA_HANDLE_ID, handleId);
@@ -1023,10 +1010,10 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
      * 【算法必须和悬浮窗一致】
      * ════════════════════════════════════════════════════════════════
      * 比例口径照抄 EdgeGestureService：
-     *   · 手柄窗口高度   = dp(handle.height)
+     *   · 手柄窗口高度   = dp(this, handle.height)
      *   · 可滚动余量 maxY = 屏高 - 手柄高          （负数取 0）
      *   · 实际 y 偏移    = maxY * (offsetPercent/100)
-     *   · 手柄条紧贴所选边缘，宽度 = dp(handle.width)
+     *   · 手柄条紧贴所选边缘，宽度 = dp(this, handle.width)
      * 用的是同一个 DisplayMetrics，所以画出来的比例是"真实"的，
      * 不是示意 —— 这也是这个控件唯一的价值所在。
      */
@@ -1047,7 +1034,7 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             super.onDraw(canvas);
 
             // ---------- 对外层留一点内边距，别贴着卡片边 ----------
-            float pad = dp(10);
+            float pad = dp(getContext(), 10);
             float availW = getWidth() - pad * 2;
             float availH = getHeight() - pad * 2;
             if (availW <= 0 || availH <= 0) return;
@@ -1065,23 +1052,23 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             screen.set(ox, oy, ox + sw, oy + sh);
             p.setStyle(Paint.Style.FILL);
             p.setColor(0xFFFFFFFF);
-            canvas.drawRoundRect(screen, dp(8), dp(8), p);
+            canvas.drawRoundRect(screen, dp(getContext(), 8), dp(getContext(), 8), p);
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(1));
+            p.setStrokeWidth(dp(getContext(), 1));
             p.setColor(C_DIVIDER);
-            canvas.drawRoundRect(screen, dp(8), dp(8), p);
+            canvas.drawRoundRect(screen, dp(getContext(), 8), dp(getContext(), 8), p);
 
             // 顶部状态栏示意线，帮助判断"离顶部多远"
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(1));
+            p.setStrokeWidth(dp(getContext(), 1));
             p.setColor(0xFFD8DCE6);
             canvas.drawLine(ox, oy + sh * (24f / dm.heightPixels),
                     ox + sw, oy + sh * (24f / dm.heightPixels), p);
 
             // ---------- 手柄条（严格按真实比例换算）----------
-            float barW = Math.max(1.5f, handle.width * dp(1) * s);
-            float barH = Math.max(3f, handle.height * dp(1) * s);
-            float maxY = Math.max(0, dm.heightPixels - dp(handle.height));
+            float barW = Math.max(1.5f, handle.width * dp(getContext(), 1) * s);
+            float barH = Math.max(3f, handle.height * dp(getContext(), 1) * s);
+            float maxY = Math.max(0, dm.heightPixels - dp(getContext(), handle.height));
             float barY = oy + (maxY * (handle.offsetPercent / 100f)) * s;
 
             // 顶部对齐时不能被状态栏示意线盖住视觉判断，故 clamp 进屏幕即可
@@ -1103,23 +1090,23 @@ public class EdgeGestureEditorActivity extends AppCompatActivity {
             p.setStyle(Paint.Style.FILL);
             p.setColor((alpha << 24) | (handle.color & 0x00FFFFFF));
 
-            float rad = Math.min(handle.radius * dp(1) * s,
+            float rad = Math.min(handle.radius * dp(getContext(), 1) * s,
                     Math.max(2f, (right - left) / 2f));
             r.set(left, barY, right, barY + barH);
             canvas.drawRoundRect(r, rad, rad, p);
 
             // 手柄太高会把条子叠成一大块，加一层描边保证边界看得清
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(1));
+            p.setStrokeWidth(dp(getContext(), 1));
             p.setColor(0x33000000);
             canvas.drawRoundRect(r, rad, rad, p);
 
             // ---------- 尺寸标注 ----------
             p.setStyle(Paint.Style.FILL);
-            p.setTextSize(dp(10));
+            p.setTextSize(dp(getContext(), 10));
             p.setColor(C_SUB);
             String dim = handle.width + " × " + handle.height + " dp";
-            canvas.drawText(dim, ox + dp(6), oy + sh - dp(8), p);
+            canvas.drawText(dim, ox + dp(getContext(), 6), oy + sh - dp(getContext(), 8), p);
         }
     }
 

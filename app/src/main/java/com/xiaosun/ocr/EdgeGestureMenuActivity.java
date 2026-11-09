@@ -3,7 +3,6 @@ package com.xiaosun.ocr;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -12,7 +11,6 @@ import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -39,6 +37,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+
+import static com.xiaosun.ocr.Palette.*;
+import static com.xiaosun.ocr.Ui.*;
 
 /**
  * 滑动菜单 —— 配置页。
@@ -73,7 +74,7 @@ import java.util.List;
  * 关键点：宏被唤起的时刻，正是手指抬起的时刻。
  * 所以宏那边不需要常驻、也不需要处理「手指还按着」的中间态。
  *
- *   宏 → 触发器 →「小孙OCR · 边缘滑动事件」，然后：
+ *   宏 → 触发器 →「Grace · 边缘滑动事件」，然后：
  *     菜单索引   选中项序号（从 0 开始；-1 = 取消或没启用菜单）
  *     菜单文字   选中项的名字
  *     菜单动作   选中项的动作值
@@ -86,13 +87,7 @@ import java.util.List;
  */
 public class EdgeGestureMenuActivity extends AppCompatActivity {
 
-    private static final int C_TEXT = 0xFF1A1D26;
-    private static final int C_SUB = 0xFF6B7280;
-    private static final int C_HINT = 0xFF9CA3AF;
-    private static final int C_BRAND = 0xFF4F6BED;
-    private static final int C_BRAND_SOFT = 0xFFEDF0FE;
-    private static final int C_DIVIDER = 0xFFEAECF2;
-    private static final int C_SURFACE = 0xFFFFFFFF;
+    /** 页面底色 —— 顶栏也用它，两者同色才看不出分界。 */
     private static final int REQ_PICK_IMAGE = 0x7A01;
     /**
      * 菜单项每行的最小高度（dp）。
@@ -136,12 +131,11 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(14), dp(20), dp(40));
+        content.setPadding(dp(this, 20), dp(this, 14), dp(this, 20), dp(this, 40));
 
         buildSwitchCard();
         buildAppearanceCard();
         buildItemsCard();
-        buildHowToCard();
 
         ScrollView sv = new ScrollView(this);
         sv.setFillViewport(true);
@@ -180,28 +174,43 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(C_BRAND);
-        bar.setPadding(dp(8), dp(14), dp(8), dp(14));
+        bar.setBackgroundColor(C_BG);
+        bar.setPadding(dp(this, 8), dp(this, 14), dp(this, 8), dp(this, 14));
 
         TextView back = new TextView(this);
         back.setText("←");
         back.setTextSize(24);
-        back.setTextColor(Color.WHITE);
+        back.setTextColor(C_TEXT);
         back.setGravity(Gravity.CENTER);
         back.setOnClickListener(v -> finish());
-        bar.addView(back, new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(back, new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
+
+        // 两级标题：上面是页面名，下面标明「属于边缘手势」——
+        // 本页是从「边缘手势」点进来的子页，没有这一行容易被当成顶层功能。
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
+        titles.setGravity(Gravity.CENTER);
 
         TextView title = new TextView(this);
         title.setText("滑动菜单");
         title.setTextSize(18);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(C_TEXT);
         title.setGravity(Gravity.CENTER);
-        bar.addView(title, new LinearLayout.LayoutParams(0,
+        titles.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("边缘手势 · 滑过手柄后弹出");
+        sub.setTextSize(11f);
+        sub.setTextColor(C_SUB);
+        sub.setGravity(Gravity.CENTER);
+        titles.addView(sub);
+
+        bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         // 右侧留一个等宽占位，保证标题真正居中
-        bar.addView(new View(this), new LinearLayout.LayoutParams(dp(48), dp(40)));
+        bar.addView(new View(this), new LinearLayout.LayoutParams(dp(this, 48), dp(this, 40)));
 
         return bar;
     }
@@ -227,16 +236,11 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         t.setTextColor(C_TEXT);
         col.addView(t);
 
-        TextView sub = new TextView(this);
-        sub.setTextSize(11.5f);
-        sub.setTextColor(C_HINT);
-        sub.setLineSpacing(0f, 1.35f);
-        sub.setText("开：滑过距离弹出菜单，抬手选中。关：立即触发宏。\n"
-                + "这是总开关。某个方向不想弹菜单（想滑一下直接触发），"
-                + "到「滑动触发 → 手柄 → 可触发方向」把那个方向的开关切成「直触」。");
-        LinearLayout.LayoutParams sl = wide();
-        sl.topMargin = dp(3);
-        col.addView(sub, sl);
+        // 原先这里还有两行说明：「开：滑过距离弹出菜单…关：立即触发宏」，
+        // 以及「某个方向想直触，到『滑动触发 → 手柄 → 可触发方向』去切」。
+        // 属于功能介绍，已删 —— 开关拨一下就能看见效果，比读两行字直观。
+        // （想给某个方向设「直触」的人，会去「可触发方向」那一栏找，
+        //   那里每个方向自己标着「菜单 / 直触」。）
 
         row.addView(col, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -294,58 +298,124 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 EdgeGesturePrefs.getMenuTextDp(this), 8, 32, "dp",
                 v -> { EdgeGesturePrefs.setMenuTextDp(this, v); touchPreview(); });
 
-        // ---- 布局（只剩「斜排」一种，横排/环形已下线）----
+        // ---- 布局：斜排 / 环形 ----
         card.addView(label("布局"), topMargin(18));
         final TextView arcBtn = new TextView(this);
         arcBtn.setText("斜排");
-        final TextView[] marks = {arcBtn};
+        final TextView ringBtn = new TextView(this);
+        ringBtn.setText("环形");
+        final TextView[] marks = {arcBtn, ringBtn};
         arcBtn.setOnClickListener(v -> {
+            boolean changed = !EdgeGesturePrefs.MENU_LAYOUT_ARC
+                    .equals(EdgeGesturePrefs.getMenuLayout(this));
             EdgeGesturePrefs.setMenuLayout(this, EdgeGesturePrefs.MENU_LAYOUT_ARC);
-            refreshLayoutMarks(marks);
-        });
-        LinearLayout layoutRow = new LinearLayout(this);
-        layoutRow.setOrientation(LinearLayout.HORIZONTAL);
-        layoutRow.addView(arcBtn, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        card.addView(layoutRow, topMargin(8));
-        refreshLayoutMarks(marks);
-        card.addView(note("斜排：从手指位置起，沿 45° 斜线从左下往右上逐项排开；\n"
-                + "一排放不下时，在它上方再加一排。"), topMargin(10));
-
-        // ---- 每排数量 ----
-        card.addView(label("每排数量"), topMargin(18));
-        addSlider(card, "每排放几项", EdgeGesturePrefs.getMenuArcPerRing(this),
-                2, 12, " 项",
-                v -> { EdgeGesturePrefs.setMenuArcPerRing(this, v); touchPreview(); });
-        card.addView(note("每排默认放几项。超过就换一排，"
-                + "第 1 排离触发点最近，越上面的排越远。"), topMargin(6));
-
-        // ---- 逐排单独设置 ----
-        // 有些排想长、有些想短，一个数不够用，所以再给一个逐排输入框。
-        card.addView(label("逐排数量（可选）"), topMargin(16));
-        final EditText rowEt = new EditText(this);
-        rowEt.setText(rowCountsToText(EdgeGesturePrefs.getMenuRowCounts(this)));
-        rowEt.setHint("留空 = 每排都用上面的值");
-        rowEt.setTextSize(14);
-        rowEt.setSingleLine(true);
-        rowEt.setInputType(InputType.TYPE_CLASS_TEXT);
-        rowEt.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 9));
-        rowEt.setPadding(dp(12), dp(10), dp(12), dp(10));
-        rowEt.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s2, int a2, int b2, int c2) {}
-
-            @Override public void onTextChanged(CharSequence s2, int a2, int b2, int c2) {}
-
-            @Override public void afterTextChanged(Editable e2) {
-                EdgeGesturePrefs.setMenuRowCounts(
-                        EdgeGestureMenuActivity.this, parseRowCounts(e2.toString()));
+            if (changed) {
+                // 「每排数量」那一段的标题/说明/是否显示「逐排输入框」
+                // 在两种布局下完全不同，必须整页重画。
+                // rebuild() 会保留滚动位置，不会跳回页首。
+                rebuild();
+            } else {
+                refreshLayoutMarks(marks);
                 touchPreview();
             }
         });
-        card.addView(rowEt, topMargin(8));
-        card.addView(note("按排填写，逗号分隔。例如 \"3,5\" = 第 1 排 3 项、"
-                + "第 2 排 5 项；排数不够时会自动接着补（都用上面的默认值）。"),
-                topMargin(6));
+        ringBtn.setOnClickListener(v -> {
+            boolean changed = !EdgeGesturePrefs.MENU_LAYOUT_RING
+                    .equals(EdgeGesturePrefs.getMenuLayout(this));
+            EdgeGesturePrefs.setMenuLayout(this, EdgeGesturePrefs.MENU_LAYOUT_RING);
+            if (changed) {
+                rebuild();
+            } else {
+                refreshLayoutMarks(marks);
+                touchPreview();
+            }
+        });
+        LinearLayout layoutRow = new LinearLayout(this);
+        layoutRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lbLp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        layoutRow.addView(arcBtn, lbLp);
+        LinearLayout.LayoutParams rbLp2 = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        rbLp2.leftMargin = dp(this, 8);
+        layoutRow.addView(ringBtn, rbLp2);
+        card.addView(layoutRow, topMargin(8));
+        refreshLayoutMarks(marks);
+        card.addView(note("斜排：从手指位置起，沿 45° 斜线从左下往右上逐项排开；\n"
+                + "一排放不下时，在它上方再加一排。\n\n"
+                + "环形：以手指触发点为圆心，各项绕圈均匀分布；\n"
+                + "一圈放不下时，在它外面再套一圈。"), topMargin(10));
+
+        // 布局类型后面好几处都要用（决定标题文案、哪几块显示），
+        // 先在这里取一次。
+        final boolean layoutRing = EdgeGesturePrefs.MENU_LAYOUT_RING
+                .equals(EdgeGesturePrefs.getMenuLayout(this));
+
+        // ---- 环形半径（仅环形布局显示）----
+        // 斜排下这个参数完全不起作用。摆在页面里只会让人调了半天
+        // 发现毫无变化，还会误以为布局切换没生效 —— 直接不显示。
+        if (layoutRing) {
+            addSlider(card, "环形半径",
+                    EdgeGesturePrefs.getMenuRingRadius(this), 0, 400, "dp",
+                    v -> { EdgeGesturePrefs.setMenuRingRadius(this, v); touchPreview(); });
+            card.addView(note("0 = 按项数自动算（推荐）。多环时它指的是最外那一圈，"
+                    + "内圈按比例跟着缩放；贴着屏幕边缘时整组环会自动往内收。"), topMargin(6));
+        }
+
+        // ---- 每排 / 每环数量 ----
+        // 斜排：这里就是「每排几项」，超过另起一排；
+        // 环形：只表示**第 1 圈**摆几项，之后每圈自动翻倍（c0、2c0、4c0……），
+        //       所以环形下不提供「逐环单独设置」（每圈数量是算出来的，不是填的）。
+        // 环形下内环下限是 4（少于 4 第一圈会挤成一团）。
+        // 老配置里可能存着 2、3 —— 进来时顺手抬到 4 并落盘，
+        // 免得「滑块显示 4、实际存的是 2」这种显示与行为不一致。
+        if (layoutRing && EdgeGesturePrefs.getMenuArcPerRing(this) < 4) {
+            EdgeGesturePrefs.setMenuArcPerRing(this, 4);
+        }
+        final TextView qtyTitle = label(layoutRing ? "每环数量（第 1 圈）" : "每排数量");
+        card.addView(qtyTitle, topMargin(18));
+        // 下限：环形 4 项（再少第一圈会挤成一团）；斜排 2 项（两列是合法排法）。
+        addSlider(card, layoutRing ? "内环摆几项" : "每排放几项",
+                Math.max(layoutRing ? 4 : 2, EdgeGesturePrefs.getMenuArcPerRing(this)),
+                layoutRing ? 4 : 2, 12, " 项",
+                v -> { EdgeGesturePrefs.setMenuArcPerRing(this, v); touchPreview(); });
+        final TextView qtyNote = note(layoutRing
+                ? "只调最里面那一圈。之后每圈都是前一圈的一倍"
+                  + "（内环 5 项 → 第二圈 10 项 → 第三圈 20 项……），"
+                  + "最少 4 项 —— 内环再小，第一圈会挤成一团。"
+                : "每排默认放几项。超过就另起一排，"
+                  + "第 1 排离触发点最近，越上面越远。");
+        card.addView(qtyNote, topMargin(6));
+
+        // ---- 逐排单独设置（仅斜排）----
+        // 有些排想长、有些想短，一个数不够用，所以再给一个逐排输入框。
+        // 环形下每圈数量由「翻倍」规则算出来，填这个没有意义，整块不显示。
+        if (!layoutRing) {
+            card.addView(label("逐排数量（可选）"), topMargin(16));
+            final EditText rowEt = new EditText(this);
+            rowEt.setText(rowCountsToText(EdgeGesturePrefs.getMenuRowCounts(this)));
+            rowEt.setHint("留空 = 每排都用上面的值");
+            rowEt.setTextSize(14);
+            rowEt.setSingleLine(true);
+            rowEt.setInputType(InputType.TYPE_CLASS_TEXT);
+            rowEt.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 9));
+            rowEt.setPadding(dp(this, 12), dp(this, 10), dp(this, 12), dp(this, 10));
+            rowEt.addTextChangedListener(new TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s2, int a2, int b2, int c2) {}
+
+                @Override public void onTextChanged(CharSequence s2, int a2, int b2, int c2) {}
+
+                @Override public void afterTextChanged(Editable e2) {
+                    EdgeGesturePrefs.setMenuRowCounts(
+                            EdgeGestureMenuActivity.this, parseRowCounts(e2.toString()));
+                    touchPreview();
+                }
+            });
+            card.addView(rowEt, topMargin(8));
+            card.addView(note("按排填写，逗号分隔。例如 \"3,5\" = 第 1 排 3 项、"
+                    + "第 2 排 5 项；排数不够时会自动接着补（都用上面的默认值）。"),
+                    topMargin(6));
+        }
         // ---- 配色 ----
         // 早先只有一个「浅色/深色」二选一开关，不够用；现在三种颜色
         // 都能直接填。描边色不用填 —— 它按圆底亮度自动取反，
@@ -366,7 +436,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         addSlider(card, "图标间距",
                 EdgeGesturePrefs.getMenuGap(this), 0, 60, "dp",
                 v -> { EdgeGesturePrefs.setMenuGap(this, v); touchPreview(); });
-        addSlider(card, "每排间距",
+        addSlider(card, layoutRing ? "环间距" : "每排间距",
                 EdgeGesturePrefs.getMenuRingGap(this), 0, 80, "dp",
                 v -> { EdgeGesturePrefs.setMenuRingGap(this, v); touchPreview(); });
         addSlider(card, "热区大小",
@@ -383,26 +453,40 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         card.addView(label("热区预览"), topMargin(18));
         hitPreview = new HitPreview();
         card.addView(hitPreview, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(160)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(this, 160)));
         card.addView(note("橙圆 = 第 1 项（压在触发点上）；蓝圈 = 手指能选中它的范围，"
-                + "相叠时取最近的那一项。"), topMargin(6));
+                + "相叠时取最近的那一项。\n"
+                + "真机上手指拖到哪一项，那一项会放大 1.6 倍并高亮。"), topMargin(6));
         content.addView(card, cardLp());
     }
 
+    /**
+     * 按当前配置刷新布局按钮的选中态。
+     *
+     * 参数顺序即按钮顺序：marks[0] = 斜排、marks[1] = 环形。
+     * 之前这里恒为 true（只剩一种布局），现在有第二项了，必须真的比一遍，
+     * 否则两个按钮会同时显示为选中，用户看不出当前到底选的是哪个。
+     */
     private void refreshLayoutMarks(TextView[] marks) {
-        // 只剩「斜排」一种布局，恒为选中态
-        for (TextView tv : marks) paintChoice(tv, true);
+        boolean ring = EdgeGesturePrefs.MENU_LAYOUT_RING
+                .equals(EdgeGesturePrefs.getMenuLayout(this));
+        if (marks.length > 0) {
+            paintChoice(marks[0], !ring);
+        }
+        if (marks.length > 1) {
+            paintChoice(marks[1], ring);
+        }
     }
 
     private void paintChoice(TextView tv, boolean on) {
         tv.setTextSize(13.5f);
         tv.setGravity(Gravity.CENTER);
-        tv.setPadding(dp(4), dp(10), dp(4), dp(10));
+        tv.setPadding(dp(this, 4), dp(this, 10), dp(this, 4), dp(this, 10));
         tv.setTextColor(on ? C_BRAND : C_SUB);
         GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(dp(9));
+        g.setCornerRadius(dp(this, 9));
         g.setColor(on ? C_BRAND_SOFT : C_SURFACE);
-        g.setStroke(dp(1), on ? C_BRAND : C_DIVIDER);
+        g.setStroke(dp(this, 1), on ? C_BRAND : C_DIVIDER);
         tv.setBackground(g);
     }
 
@@ -426,10 +510,10 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         add.setText("＋ 添加");
         add.setTextSize(13);
         add.setTextColor(C_BRAND);
-        add.setPadding(dp(12), dp(6), dp(12), dp(6));
+        add.setPadding(dp(this, 12), dp(this, 6), dp(this, 12), dp(this, 6));
         GradientDrawable ab = new GradientDrawable();
         ab.setColor(C_BRAND_SOFT);
-        ab.setCornerRadius(dp(8));
+        ab.setCornerRadius(dp(this, 8));
         add.setBackground(ab);
         add.setOnClickListener(v -> editItem(-1));
         head.addView(add);
@@ -458,7 +542,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 // 补偿位移，间距统一了补偿量才是准的（见 swapRows）。
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(8);
+                lp.topMargin = dp(this, 8);
                 box.addView(buildItemRow(i, box), lp);
             }
             card.addView(box, topMargin(2));
@@ -495,10 +579,10 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 12));
-        row.setPadding(dp(12), dp(8), dp(10), dp(8));
+        row.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 12));
+        row.setPadding(dp(this, 12), dp(this, 8), dp(this, 10), dp(this, 8));
         // 固定高度：拖动步长靠它，见本方法注释
-        row.setMinimumHeight(dp(ROW_HEIGHT_DP));
+        row.setMinimumHeight(dp(this, ROW_HEIGHT_DP));
 
         // ---- 序号角标 ----
         TextView no = new TextView(this);
@@ -509,24 +593,24 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         no.setGravity(Gravity.CENTER);
         GradientDrawable nb = new GradientDrawable();
         nb.setColor(C_BRAND_SOFT);
-        nb.setCornerRadius(dp(6));
+        nb.setCornerRadius(dp(this, 6));
         no.setBackground(nb);
-        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(dp(20), dp(20));
-        nl.rightMargin = dp(9);
+        LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(dp(this, 20), dp(this, 20));
+        nl.rightMargin = dp(this, 9);
         row.addView(no, nl);
 
         // ---- 图标缩略图 ----
         FrameLayout thumb = new FrameLayout(this);
         Drawable icon = MenuIcons.load(this, it.source);
         GradientDrawable tbg = new GradientDrawable();
-        tbg.setCornerRadius(dp(8));
+        tbg.setCornerRadius(dp(this, 8));
         tbg.setColor(C_BRAND_SOFT);
         thumb.setBackground(tbg);
         if (icon != null) {
             ImageView iv = new ImageView(this);
             iv.setImageDrawable(icon);
             iv.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-            int pad = dp(5);
+            int pad = dp(this, 5);
             iv.setPadding(pad, pad, pad, pad);
             thumb.addView(iv, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -545,7 +629,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
         }
-        row.addView(thumb, new LinearLayout.LayoutParams(dp(32), dp(32)));
+        row.addView(thumb, new LinearLayout.LayoutParams(dp(this, 32), dp(this, 32)));
 
         // ---- 名字 + 来源（竖列，占满剩余宽度）----
         LinearLayout col = new LinearLayout(this);
@@ -569,7 +653,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        cl.leftMargin = dp(9);
+        cl.leftMargin = dp(this, 9);
         row.addView(col, cl);
 
         // ---- 「⋯」：编辑 / 删除。长按已被拖动占用，删除得另找入口 ----
@@ -579,7 +663,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         more.setTextColor(C_HINT);
         more.setGravity(Gravity.CENTER);
         more.setContentDescription("更多操作");
-        more.setPadding(dp(8), dp(4), dp(8), dp(4));
+        more.setPadding(dp(this, 8), dp(this, 4), dp(this, 8), dp(this, 4));
         more.setOnClickListener(v -> showItemMenu(index));
         row.addView(more, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -590,7 +674,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         handle.setTextSize(17);
         handle.setTextColor(C_HINT);
         handle.setGravity(Gravity.CENTER);
-        handle.setPadding(dp(6), dp(4), dp(2), dp(4));
+        handle.setPadding(dp(this, 6), dp(this, 4), dp(this, 2), dp(this, 4));
         row.addView(handle, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -688,7 +772,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         scroller.getLocationOnScreen(loc);
         int top = loc[1];
         int bottom = top + scroller.getHeight();
-        int edge = dp(AUTO_SCROLL_EDGE_DP);
+        int edge = dp(this, AUTO_SCROLL_EDGE_DP);
 
         int step = 0;
         if (rawY < top + edge) {
@@ -803,7 +887,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         // 被拖的行要「浮」起来：抬 elevation 让它绘制在其它行之上，
         // 同时关掉裁剪，否则移出容器的那部分会被切掉。
-        v.setElevation(dp(12));
+        v.setElevation(dp(this, 12));
         v.setAlpha(0.97f);
         v.setScaleX(1.02f);
         v.setScaleY(1.02f);
@@ -842,7 +926,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
             }
         }
         // 只有一行：拖也换不了位，步长给个非零值即可，避免下面除零
-        return Math.max(1, rowHeight + dp(8));
+        return Math.max(1, rowHeight + dp(this, 8));
     }
 
     /**
@@ -1041,7 +1125,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(20), dp(6), dp(20), 0);
+        box.setPadding(dp(this, 20), dp(this, 6), dp(this, 20), 0);
 
         final EditText etName = new EditText(this);
         final EditText etAction = new EditText(this);
@@ -1087,8 +1171,8 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         final ImageView preview = new ImageView(this);
         preview.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(40), dp(40));
-        pl.leftMargin = dp(10);
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(dp(this, 40), dp(this, 40));
+        pl.leftMargin = dp(this, 10);
         srcRow.addView(preview, pl);
 
         box.addView(srcRow, topMargin(6));
@@ -1106,7 +1190,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 String src = etSource.getText().toString();
                 Drawable d = MenuIcons.load(EdgeGestureMenuActivity.this, src);
                 GradientDrawable g = new GradientDrawable();
-                g.setCornerRadius(dp(9));
+                g.setCornerRadius(dp(EdgeGestureMenuActivity.this, 9));
                 if (d != null) {
                     preview.setImageDrawable(d);
                     preview.setBackground(null);
@@ -1174,14 +1258,14 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         b.setTextSize(13);
         b.setTextColor(C_BRAND);
         GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(dp(8));
+        g.setCornerRadius(dp(this, 8));
         g.setColor(C_BRAND_SOFT);
         b.setBackground(g);
-        b.setPadding(dp(14), dp(4), dp(14), dp(4));
+        b.setPadding(dp(this, 14), dp(this, 4), dp(this, 14), dp(this, 4));
         b.setOnClickListener(l);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.rightMargin = dp(10);
+        lp.rightMargin = dp(this, 10);
         b.setLayoutParams(lp);
         return b;
     }
@@ -1262,41 +1346,6 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
     }
 
     // ============================================================
-    //  说明卡片
-    // ============================================================
-
-    private void buildHowToCard() {
-        LinearLayout card = card();
-        card.addView(label("怎么和宏配合"), wide());
-
-        TextView t = new TextView(this);
-        t.setTextSize(12);
-        t.setTextColor(C_SUB);
-        t.setLineSpacing(0f, 1.45f);
-        t.setText(
-                "宏 → 触发器 →「小孙OCR · 边缘滑动事件」，再自己建变量接这三个值：\n"
-                        + "  菜单索引   0 / 1 / 2 …（-1 = 取消）\n"
-                        + "  菜单文字   选中项的名字\n"
-                        + "  菜单动作   选中项的动作值\n"
-                        + "变量名你自己定，本应用不限定。抬手那一刻才触发宏，"
-                        + "宏里可以直接执行动作。"
-        );
-        LinearLayout.LayoutParams tl = wide();
-        tl.topMargin = dp(8);
-        card.addView(t, tl);
-
-        TextView tip = new TextView(this);
-        tip.setTextSize(11.5f);
-        tip.setTextColor(C_HINT);
-        tip.setLineSpacing(0f, 1.35f);
-        tip.setText("\n小提示：菜单弹出后，手指滑到按钮上会高亮；"
-                + "滑到空白处松手＝取消（index = -1）。");
-        card.addView(tip, topMargin(8));
-
-        content.addView(card, cardLp());
-    }
-
-    // ============================================================
     //  存取
     // ============================================================
 
@@ -1345,7 +1394,6 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         buildSwitchCard();
         buildAppearanceCard();
         buildItemsCard();
-        buildHowToCard();
         // 视图换了一整批，任何还指向旧视图的拖动状态都必须清掉 ——
         // 尤其是自动滚动那个自循环 Runnable，否则它会一直拿着已移除的
         // dragView 往下滚。
@@ -1390,8 +1438,8 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
 
         final View swatch = new View(this);
         paintSwatch(swatch, cur);
-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(dp(24), dp(24));
-        sl.rightMargin = dp(8);
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(dp(this, 24), dp(this, 24));
+        sl.rightMargin = dp(this, 8);
         row.addView(swatch, sl);
 
         final EditText et = new EditText(this);
@@ -1399,8 +1447,8 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         et.setTextSize(12.5f);
         et.setSingleLine(true);
         et.setGravity(Gravity.CENTER);
-        et.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 9));
-        et.setPadding(dp(4), dp(8), dp(4), dp(8));
+        et.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 9));
+        et.setPadding(dp(this, 4), dp(this, 8), dp(this, 4), dp(this, 8));
         et.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s2, int a2, int b2, int c2) {}
 
@@ -1416,7 +1464,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 touchPreview();
             }
         });
-        row.addView(et, new LinearLayout.LayoutParams(dp(116),
+        row.addView(et, new LinearLayout.LayoutParams(dp(this, 116),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         parent.addView(row, topMargin(12));
@@ -1425,9 +1473,9 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
     /** 画色块（预览当前颜色）。 */
     private void paintSwatch(View v, int argb) {
         GradientDrawable g = new GradientDrawable();
-        g.setCornerRadius(dp(6));
+        g.setCornerRadius(dp(this, 6));
         g.setColor(argb);
-        g.setStroke(dp(1), C_DIVIDER);
+        g.setStroke(dp(this, 1), C_DIVIDER);
         v.setBackground(g);
     }
 
@@ -1454,7 +1502,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         val.setTextColor(C_BRAND);
         val.setTypeface(null, android.graphics.Typeface.BOLD);
         val.setGravity(Gravity.END);
-        row.addView(val, new LinearLayout.LayoutParams(dp(64),
+        row.addView(val, new LinearLayout.LayoutParams(dp(this, 64),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         SeekBar sb = new SeekBar(this);
@@ -1542,7 +1590,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
             try {
                 Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
                 p.setColor(0xFF9CA3AF);
-                p.setTextSize(dp(12));
+                p.setTextSize(dp(getContext(), 12));
                 p.setTextAlign(Paint.Align.CENTER);
                 String s = "菜单还是空的，先在下面「菜单项」里添加";
                 cv.drawText(s, getWidth() / 2f, getHeight() / 2f, p);
@@ -1580,17 +1628,106 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 return;
             }
 
-            float iconPx = dp(EdgeGesturePrefs.getMenuIconDp(c));
+            float iconPx = dp(getContext(), EdgeGesturePrefs.getMenuIconDp(c));
             if (iconPx <= 0f) return;
 
-            float gap = dp(EdgeGesturePrefs.getMenuGap(c));
+            float gap = dp(getContext(), EdgeGesturePrefs.getMenuGap(c));
             int defPerRow = Math.max(1, EdgeGesturePrefs.getMenuArcPerRing(c));
             int[] perRow = EdgeGesturePrefs.getMenuRowCounts(c);
             // 与悬浮窗一致：基准是图标直径，0 = 图标紧挨
-            float rowGap = iconPx + dp(EdgeGesturePrefs.getMenuRingGap(c));
+            float rowGap = iconPx + dp(getContext(), EdgeGesturePrefs.getMenuRingGap(c));
             float sp = iconPx + gap;
             final float dirX = 0.70710678f, dirY = -0.70710678f;   // 左下 → 右上
             final float offX = -0.70710678f, offY = -0.70710678f;  // 新排往左上
+
+            // 预览也要跟着布局变。否则用户点了「环形」，
+            // 下面这张热区预览还是斜排，等于告诉他「没生效」。
+            boolean ring = EdgeGesturePrefs.MENU_LAYOUT_RING
+                    .equals(EdgeGesturePrefs.getMenuLayout(c));
+
+            float[] rx = new float[n], ry = new float[n];
+            float minX = 0f, minY = 0f, maxX = 0f, maxY = 0f;
+
+            if (ring) {
+                // ---- 环形预览：与 EdgeGestureService.layoutMenuRing 同一套算法 ----
+                // 只设内环： 「每排放几项」在环形下 = 第 1 圈摆几个，
+                // 之后每圈都是前一圈的一倍（c0、2c0、4c0……），内环最少 4 项。
+                float textH = EdgeGesturePrefs.isMenuShowText(c)
+                        ? dp(getContext(), EdgeGesturePrefs.getMenuTextDp(c))
+                          + dp(getContext(), EdgeGesturePrefs.getMenuTextGap(c)) : 0f;
+                // 文字统一画在图标下方 → 单项占位半径 = 图标半径 + 整段文字高度
+                float itemR = iconPx / 2f + textH;
+
+                int c0 = Math.max(4, Math.max(1, defPerRow));
+                int[] cnt = new int[n + 1];
+                int rings = 0, left = n, cap = c0;
+                while (left > 0 && rings <= n) {
+                    int take = Math.min(cap, left);
+                    cnt[rings] = take;
+                    left -= take;
+                    rings++;
+                    cap = cap > (1 << 20) ? (1 << 20) : cap * 2;
+                }
+
+                float[] radii = new float[Math.max(1, rings)];
+                float prevR = 0f;
+                for (int r = 0; r < rings; r++) {
+                    float minByChord = 0f;
+                    if (cnt[r] > 1) {
+                        float sin = (float) Math.sin(Math.PI / cnt[r]);
+                        minByChord = sin > 0.001f ? (iconPx + gap) / (2f * sin) : (iconPx + gap);
+                    }
+                    float R;
+                    if (r == 0) {
+                        R = cnt[0] <= 1 ? itemR + dp(getContext(), 24) : Math.max(minByChord, itemR + dp(getContext(), 10));
+                    } else {
+                        // 外环至少往外挪出「一整个项位 + 环间距」
+                        R = prevR + iconPx + textH + dp(getContext(), EdgeGesturePrefs.getMenuRingGap(c));
+                        if (minByChord > R) R = minByChord;
+                    }
+                    radii[r] = R;
+                    prevR = R;
+                }
+                // 手动半径指的是「最外环」，各环按同一比例缩放（与悬浮窗一致）
+                int manual = EdgeGesturePrefs.getMenuRingRadius(c);
+                if (manual > 0 && rings > 0 && radii[rings - 1] > 0.001f) {
+                    float f = dp(getContext(), manual) / radii[rings - 1];
+                    for (int r = 0; r < rings; r++) radii[r] *= f;
+                }
+
+                int idx = 0;
+                for (int r = 0; r < rings && idx < n; r++) {
+                    int cc = cnt[r];
+                    for (int j = 0; j < cc && idx < n; j++, idx++) {
+                        float x, y;
+                        if (cc == 1) {
+                            // 单项环放正上方，避免 0 度距退化
+                            x = 0f;
+                            y = -radii[r];
+                        } else {
+                            // 每环第 1 项都在正上方，顺时针均分
+                            double a = -Math.PI / 2.0 + 2.0 * Math.PI * j / cc;
+                            x = (float) (Math.cos(a) * radii[r]);
+                            y = (float) (Math.sin(a) * radii[r]);
+                        }
+                        rx[idx] = x;
+                        ry[idx] = y;
+                        float rad = iconPx / 2f;
+                        if (idx == 0) {
+                            minX = x - rad; maxX = x + rad;
+                            minY = y - rad; maxY = y + rad;
+                        } else {
+                            minX = Math.min(minX, x - rad);
+                            maxX = Math.max(maxX, x + rad);
+                            minY = Math.min(minY, y - rad);
+                            maxY = Math.max(maxY, y + rad);
+                        }
+                    }
+                }
+                // 文字画在图标下方 → 包络底边要把文字高度算进去，
+                // 否则预览会被「压到底边」显得贴边，和实机不一致。
+                maxY += textH;
+            } else {
 
             // 按逐排数量切开（与悬浮窗同一套规则）
             int[] cnt = new int[n + 1];
@@ -1605,8 +1742,6 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
             }
 
             // ★ 中心轴过触发点，每排沿 45° 方向居中（与悬浮窗同一套规则）
-            float[] rx = new float[n], ry = new float[n];
-            float minX = 0f, minY = 0f, maxX = 0f, maxY = 0f;
             int idx = 0;
             for (int r = 0; r < rows && idx < n; r++) {
                 for (int col = 0; col < cnt[r] && idx < n; col++) {
@@ -1632,11 +1767,12 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                     idx++;
                 }
             }
+            }   // ← 结束「斜排」分支
 
             // 等比缩放到预览框里，再居中
-            float pad = dp(10);
-            float availW = Math.max(dp(4), getWidth() - pad * 2f);
-            float availH = Math.max(dp(4), getHeight() - pad * 2f);
+            float pad = dp(getContext(), 10);
+            float availW = Math.max(dp(getContext(), 4), getWidth() - pad * 2f);
+            float availH = Math.max(dp(getContext(), 4), getHeight() - pad * 2f);
             float envW = Math.max(1f, maxX - minX);
             float envH = Math.max(1f, maxY - minY);
             float k = Math.min(1f, Math.min(availW / envW, availH / envH));
@@ -1655,7 +1791,7 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                 p.setColor(0x334F6BED);
                 cv.drawCircle(x, y, hitR, p);
                 p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(dp(1));
+                p.setStrokeWidth(dp(getContext(), 1));
                 p.setColor(0x884F6BED);
                 cv.drawCircle(x, y, hitR, p);
 
@@ -1677,14 +1813,14 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
                     if (i >= items.size()) continue;
                     String txt = items.get(i).text;
                     if (txt != null && txt.length() > 0) {
-                        float tx = dp(EdgeGesturePrefs.getMenuTextDp(c)) * k;
+                        float tx = dp(getContext(), EdgeGesturePrefs.getMenuTextDp(c)) * k;
                         p.setStyle(Paint.Style.FILL);
                         p.setColor(EdgeGesturePrefs.getMenuTextColor(c));
                         p.setTextSize(tx);
                         p.setTextAlign(Paint.Align.CENTER);
                         Paint.FontMetrics fm = p.getFontMetrics();
                         float ty = y + iconR
-                                + dp(EdgeGesturePrefs.getMenuTextGap(c)) * k
+                                + dp(getContext(), EdgeGesturePrefs.getMenuTextGap(c)) * k
                                 - fm.ascent;
                         cv.drawText(txt, x, ty, p);
                     }
@@ -1696,15 +1832,15 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
     private LinearLayout card() {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackground(borderedBg(C_SURFACE, C_DIVIDER, 14));
-        c.setPadding(dp(16), dp(14), dp(16), dp(14));
-        c.setElevation(dp(1));
+        c.setBackground(borderedBg(this, C_SURFACE, C_DIVIDER, 14));
+        c.setPadding(dp(this, 16), dp(this, 14), dp(this, 16), dp(this, 14));
+        c.setElevation(dp(this, 1));
         return c;
     }
 
     private LinearLayout.LayoutParams cardLp() {
         LinearLayout.LayoutParams lp = wide();
-        lp.bottomMargin = dp(12);
+        lp.bottomMargin = dp(this, 12);
         return lp;
     }
 
@@ -1725,31 +1861,13 @@ public class EdgeGestureMenuActivity extends AppCompatActivity {
         return tv;
     }
 
-    private GradientDrawable borderedBg(int fill, int stroke, float radiusDp) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(fill);
-        g.setCornerRadius(dp(radiusDp));
-        g.setStroke(dp(1), stroke);
-        return g;
-    }
-
-    private LinearLayout.LayoutParams wide() {
-        return new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    private LinearLayout.LayoutParams topMargin(int dp) {
+            private LinearLayout.LayoutParams topMargin(int dp) {
         LinearLayout.LayoutParams lp = wide();
-        lp.topMargin = dp(dp);
+        lp.topMargin = dp(this, dp);
         return lp;
     }
 
-    private int dp(float v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
-                getResources().getDisplayMetrics());
-    }
-
-    private void toast(String msg) {
+        private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
 
